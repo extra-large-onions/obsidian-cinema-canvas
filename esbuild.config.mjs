@@ -19,6 +19,10 @@ const context = await esbuild.context({
 	external: [
 		'obsidian',
 		'electron',
+		// A native N-API addon: bundling it would inline the JavaScript and
+		// leave the .node binary behind, so it is required from the plugin's
+		// own node_modules at runtime.
+		'onnxruntime-node',
 		'@codemirror/autocomplete',
 		'@codemirror/collab',
 		'@codemirror/commands',
