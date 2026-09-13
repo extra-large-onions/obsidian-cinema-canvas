@@ -893,3 +893,389 @@
 	justify-content: center;
 	padding: 32px;
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * The sound view. Built on the clip view's frame — header, stage, body — with
+ * the ribbon swapped for lanes: the whole film above, the playhead's minute
+ * below.
+ * ---------------------------------------------------------------------------
+ */
+.cine-sound-stage {
+	flex: 1 1 38%;
+}
+
+/* An audio file needs its controls and nothing more. */
+.cine-sound-stage.is-audio {
+	flex: 0 0 auto;
+	min-height: 0;
+	padding: 8px 12px;
+}
+
+.cine-sound-stage.is-audio .cine-clip-video {
+	width: 100%;
+	height: 40px;
+}
+
+.cine-sound-timeline {
+	flex: 0 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px 12px 6px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.cine-sound-lanes {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+}
+
+.cine-sound-labels {
+	flex: 0 0 72px;
+	display: flex;
+	flex-direction: column;
+}
+
+.cine-sound-label {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	overflow: hidden;
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	line-height: 1;
+	white-space: nowrap;
+}
+
+.cine-sound-lanes.is-overview .cine-sound-label {
+	align-items: flex-start;
+}
+
+.cine-sound-canvas {
+	flex: 1 1 auto;
+	min-width: 0;
+	width: 100%;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.cine-sound-lanes.is-detail .cine-sound-canvas {
+	cursor: crosshair;
+}
+
+/* What is under the pointer, or under the playhead when nothing is. */
+.cine-sound-readout {
+	min-height: 1.5em;
+	padding-left: 80px;
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.cine-sound-body {
+	flex: 1 1 40%;
+}
+
+.cine-sound-cta {
+	display: flex;
+	justify-content: center;
+	margin-top: -16px;
+}
+
+.cine-sound-progress {
+	max-width: 360px;
+	height: 6px;
+	margin: -16px auto 20px;
+	overflow: hidden;
+	background: var(--background-modifier-border);
+	border-radius: 3px;
+}
+
+.cine-sound-progress-bar {
+	width: 0;
+	height: 100%;
+	background: var(--interactive-accent);
+	transition: width 200ms linear;
+}
+
+.cine-sound-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 20px;
+	margin-bottom: 14px;
+}
+
+.cine-sound-stat {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--font-smaller);
+}
+
+.cine-sound-stat-label {
+	color: var(--text-muted);
+}
+
+.cine-sound-stat-value {
+	color: var(--text-normal);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Lane colours, shared by the swatches and the bars in the lists. */
+.cine-sound-swatch {
+	flex: 0 0 auto;
+	width: 9px;
+	height: 9px;
+	border-radius: 2px;
+}
+
+.is-dialogue {
+	background: var(--color-blue);
+}
+
+.is-music {
+	background: var(--color-purple);
+}
+
+.is-effects {
+	background: var(--color-orange);
+}
+
+.is-silence {
+	background: var(--text-faint);
+}
+
+.cine-sound-columns {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 16px;
+}
+
+.cine-sound-list {
+	min-width: 0;
+}
+
+.cine-sound-list-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding-bottom: 6px;
+	margin-bottom: 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-smaller);
+	font-weight: var(--font-semibold);
+}
+
+.cine-sound-list-count {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-weight: normal;
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-sound-list-empty {
+	padding: 6px 2px;
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+}
+
+/* Index, timecode, a bar as long as the run is against the longest, length. */
+.cine-sound-row {
+	display: grid;
+	grid-template-columns: 2.4em 5.6em 1fr 4.6em;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 4px;
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+
+.cine-sound-row:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.cine-sound-row-index {
+	color: var(--text-faint);
+	text-align: right;
+}
+
+.cine-sound-row-meter {
+	height: 4px;
+	overflow: hidden;
+	background: var(--background-modifier-border);
+	border-radius: 2px;
+}
+
+.cine-sound-row-fill {
+	display: block;
+	height: 100%;
+	opacity: 0.8;
+}
+
+.cine-sound-row-length {
+	text-align: right;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The strip's two tabs: the same clip, cut or heard.
+ *
+ * The canvas answers "which file". The strip answers "what is in it", and
+ * there are two different answers — where it cuts, and what it sounds like —
+ * so they are tabs over one body rather than two strips fighting for the same
+ * height.
+ */
+
+.cine-strip-tabs {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: stretch;
+	gap: 2px;
+	padding: 2px;
+	border-radius: 7px;
+	background: var(--background-modifier-border);
+}
+
+.cine-strip-tab {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 3px 10px;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	cursor: pointer;
+}
+
+.cine-strip-tab:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.cine-strip-tab.is-active,
+.cine-strip-tab.is-active:hover {
+	background: var(--background-primary);
+	color: var(--text-accent);
+	box-shadow: var(--shadow-s);
+}
+
+.cine-strip-tab .svg-icon {
+	width: 13px;
+	height: 13px;
+}
+
+/* A dot on the tab whose side has never been run for this clip. */
+.cine-strip-tab-dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--text-faint);
+}
+
+/* The sound side of the strip: the same four lanes, an inch high. */
+.cine-strip-sound {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	height: var(--cine-strip-height);
+	padding: 0 10px 8px;
+}
+
+.cine-strip-sound-canvas {
+	display: block;
+	width: 100%;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.cine-strip-sound-readout {
+	flex: 0 0 auto;
+	overflow: hidden;
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+/*
+ * The prompt that stands in for the lanes: download, analyse, progress, error.
+ * It occupies the same height the lanes would, so switching tabs on an
+ * unanalysed clip does not make the canvas above jump.
+ */
+.cine-strip-panel {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	justify-content: center;
+	gap: 6px;
+	height: var(--cine-strip-height);
+	padding: 0 10px 8px;
+}
+
+.cine-strip-panel-text {
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	line-height: 1.4;
+}
+
+.cine-strip-panel-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.cine-strip-progress {
+	width: 220px;
+	height: 4px;
+	overflow: hidden;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+}
+
+.cine-strip-progress-bar {
+	height: 100%;
+	width: 0;
+	border-radius: 2px;
+	background: var(--interactive-accent);
+	transition: width 0.2s linear;
+}
+
+/*
+ * Full screen: the player and the lanes, nothing else.
+ *
+ * The header and the lists are the two things you cannot read from across the
+ * room; the lanes are the one thing worth having bigger. The player's own full
+ * screen button hands the picture to the compositor, where nothing can be drawn
+ * over it -- this one takes the whole view instead, so the sound stays visible.
+ */
+.cine-sound-view:fullscreen {
+	background: var(--background-primary);
+}
+
+.cine-sound-view:fullscreen .cine-clip-header,
+.cine-sound-view:fullscreen .cine-sound-body {
+	display: none;
+}
+
+.cine-sound-view:fullscreen .cine-sound-stage {
+	flex: 1 1 auto;
+	background: #000;
+}
+
+.cine-sound-view:fullscreen .cine-sound-timeline {
+	padding-bottom: 10px;
+	border-bottom: none;
+}

@@ -1,11 +1,12 @@
 import { ItemView, Notice, WorkspaceLeaf, setIcon, setTooltip } from 'obsidian';
 import type CinemaCanvasPlugin from '../main';
-import { DETECTOR_LABELS, Detector } from '../media/shots';
+import { DETECTOR_LABEL } from '../media/shots';
 import { MediaItem, Shot } from '../types';
 import { formatTimecode } from '../utils/timecode';
+import { SegmentPlayer } from './segment-player';
 import {
 	ParamHost,
-	renderDetectorButtons,
+	renderFindCuts,
 	renderParams,
 	shotStats,
 } from './shot-controls';
@@ -42,14 +43,14 @@ export class CinemaClipView extends ItemView {
 	private actionEl!: HTMLElement;
 	private stageEl!: HTMLElement;
 	private video: HTMLVideoElement | null = null;
+	/** Confines playback to a clicked segment, to the frame. */
+	private player: SegmentPlayer | null = null;
 	private ribbonEl!: HTMLElement;
 	private playheadEl!: HTMLElement;
 	private bodyEl!: HTMLElement;
 
 	private path: string | null = null;
 	private item: MediaItem | null = null;
-	/** The segment playback is confined to, if any. */
-	private confined: Shot | null = null;
 	/** The segment under the playhead, confined or not. */
 	private activeIndex: number | null = null;
 	private loopSegment = false;
@@ -70,7 +71,6 @@ export class CinemaClipView extends ItemView {
 		this.loopSegment = plugin.settings.loopLightboxVideos;
 		this.paramHost = {
 			getParams: () => ({
-				shotThreshold: this.plugin.settings.shotThreshold,
 				transnetThreshold: this.plugin.settings.transnetThreshold,
 				minShotLength: this.plugin.settings.minShotLength,
 			}),
@@ -142,8 +142,7 @@ export class CinemaClipView extends ItemView {
 		if (this.frame !== null) window.cancelAnimationFrame(this.frame);
 		this.frame = null;
 		this.clearCards();
-		this.video?.pause();
-		this.video = null;
+		this.dropVideo();
 	}
 
 	/**
@@ -167,9 +166,8 @@ export class CinemaClipView extends ItemView {
 				: undefined;
 		if (typeof path === 'string' && path !== this.path) {
 			this.path = path;
-			this.confined = null;
 			this.activeIndex = null;
-			this.video = null;
+			this.dropVideo();
 			this.resolveItem();
 			this.render();
 		}
@@ -181,10 +179,16 @@ export class CinemaClipView extends ItemView {
 		if (item.path === this.path) return;
 		this.path = item.path;
 		this.item = item;
-		this.confined = null;
 		this.activeIndex = null;
-		this.video = null;
+		this.dropVideo();
 		this.render();
+	}
+
+	private dropVideo(): void {
+		this.player?.destroy();
+		this.player = null;
+		this.video?.pause();
+		this.video = null;
 	}
 
 	private resolveItem(): void {
@@ -226,6 +230,7 @@ export class CinemaClipView extends ItemView {
 
 	private renderMissing(): void {
 		this.actionEl.empty();
+		this.dropVideo();
 		this.stageEl.empty();
 		this.ribbonEl.hide();
 		this.clearCards();
@@ -243,13 +248,12 @@ export class CinemaClipView extends ItemView {
 	}
 
 	private renderSummary(item: MediaItem, shots: Shot[] | null): void {
-		const pending = this.plugin.shots.pendingDetector(item);
-		if (pending) {
+		if (this.plugin.shots.isPending(item)) {
 			const progress = this.plugin.shots.progressFor(item);
 			const percent =
 				progress === null ? '' : ` ${Math.round(progress * 100)}%`;
 			this.summaryEl.setText(
-				`${item.file.name} — ${DETECTOR_LABELS[pending]} is finding cuts…${percent}`,
+				`${item.file.name} — ${DETECTOR_LABEL} is finding cuts…${percent}`,
 			);
 			return;
 		}
@@ -261,11 +265,9 @@ export class CinemaClipView extends ItemView {
 			return;
 		}
 		const stats = shotStats(shots);
-		const detector = this.plugin.shots.detectorFor(item);
 		this.summaryEl.setText(
 			[
 				item.file.name,
-				...(detector ? [DETECTOR_LABELS[detector]] : []),
 				`${shots.length} segment${shots.length === 1 ? '' : 's'}`,
 				`${stats.average.toFixed(1)}s avg`,
 				`${stats.shortest.toFixed(1)}s – ${stats.longest.toFixed(1)}s`,
@@ -276,19 +278,25 @@ export class CinemaClipView extends ItemView {
 	}
 
 	private renderActions(item: MediaItem, shots: Shot[] | null): void {
-		const detector = this.plugin.shots.detectorFor(item);
 		const cut = shots !== null && shots.length > 0;
 
-		if (cut) renderParams(this.actionEl, detector, this.paramHost);
+		if (cut) renderParams(this.actionEl, this.paramHost);
 
-		renderDetectorButtons(this.actionEl, item, detector, !cut, {
+		renderFindCuts(this.actionEl, item, !cut, {
 			shots: this.plugin.shots,
-			run: (target, next) => void this.detect(target, next, false),
-			show: (target, next) => {
-				this.plugin.shots.prefer(target, next);
-				this.activeIndex = null;
-			},
+			run: (target) => void this.detect(target, false),
 		});
+
+		const sound = this.actionEl.createEl('button', {
+			cls: 'cine-strip-icon',
+		});
+		setIcon(sound, 'audio-waveform');
+		setTooltip(
+			sound,
+			'Open this clip in the sound view: dialogue, music, effects and silence',
+			{ placement: 'bottom' },
+		);
+		sound.addEventListener('click', () => void this.plugin.openSound(item.file));
 
 		if (!cut) return;
 
@@ -313,16 +321,10 @@ export class CinemaClipView extends ItemView {
 			cls: 'cine-strip-icon',
 		});
 		setIcon(again, 'refresh-cw');
-		setTooltip(
-			again,
-			detector
-				? `Run ${DETECTOR_LABELS[detector]} over this clip again`
-				: 'Find cuts again',
-			{ placement: 'bottom' },
-		);
-		again.addEventListener('click', () => {
-			if (detector) void this.detect(item, detector, true);
+		setTooltip(again, `Run ${DETECTOR_LABEL} over this clip again`, {
+			placement: 'bottom',
 		});
+		again.addEventListener('click', () => void this.detect(item, true));
 
 		const expand = this.actionEl.createEl('button', {
 			cls: 'cine-strip-icon',
@@ -341,6 +343,7 @@ export class CinemaClipView extends ItemView {
 	 */
 	private ensureVideo(item: MediaItem): void {
 		if (this.video && this.video.dataset.path === item.path) return;
+		this.dropVideo();
 		this.stageEl.empty();
 		const video = this.stageEl.createEl('video', {
 			cls: 'cine-clip-video',
@@ -350,8 +353,16 @@ export class CinemaClipView extends ItemView {
 		video.controls = true;
 		video.playsInline = true;
 		video.preload = 'metadata';
-		video.addEventListener('timeupdate', () => this.onTimeUpdate());
-		video.addEventListener('seeked', () => this.onTimeUpdate());
+		// The frame callback drives the playhead as well as the segment
+		// boundary, so the ribbon moves per frame rather than four times a
+		// second. `seeked` covers a scrub while paused.
+		this.player = new SegmentPlayer(video, {
+			loop: () => this.loopSegment,
+			onFrame: (time) => this.syncPlayhead(time),
+		});
+		video.addEventListener('seeked', () =>
+			this.syncPlayhead(video.currentTime),
+		);
 		this.video = video;
 	}
 
@@ -396,8 +407,7 @@ export class CinemaClipView extends ItemView {
 	private renderCards(item: MediaItem, shots: Shot[] | null): void {
 		this.clearCards();
 
-		const pending = this.plugin.shots.pendingDetector(item);
-		if (pending) {
+		if (this.plugin.shots.isPending(item)) {
 			this.bodyEl.createDiv({ cls: 'cine-clip-spinner-row' }).createDiv({
 				cls: 'cine-strip-spinner',
 			});
@@ -406,7 +416,7 @@ export class CinemaClipView extends ItemView {
 		if (!shots || shots.length === 0) {
 			this.bodyEl.createDiv({
 				cls: 'cine-clip-placeholder',
-				text: 'No segments yet. Pick a detector above: ffmpeg is seconds, TransNetV2 is about a minute and a half per six minutes of video and far fewer false cuts.',
+				text: 'No segments yet. Press Find cuts above: TransNetV2 takes about a minute and a half per six minutes of video.',
 			});
 			return;
 		}
@@ -494,29 +504,15 @@ export class CinemaClipView extends ItemView {
 	/** Seeks to a segment and plays it, confined to its own range. */
 	private playShot(item: MediaItem, shot: Shot): void {
 		const video = this.video;
-		if (!video) return;
-		this.confined = shot;
+		const player = this.player;
+		if (!video || !player) return;
 		this.setActive(shot.index);
-		const start = (): void => {
-			video.currentTime = shot.start;
+		player.play(shot, () => {
 			void video.play().catch(() => {
 				// Autoplay can be refused before any user gesture reaches the
 				// document; the seek still happened, so the frame is right.
 			});
-		};
-		if (video.readyState >= 1) start();
-		else video.addEventListener('loadedmetadata', start, { once: true });
-	}
-
-	private onTimeUpdate(): void {
-		const video = this.video;
-		if (!video) return;
-		const shot = this.confined;
-		if (shot && video.currentTime >= shot.end) {
-			if (this.loopSegment) video.currentTime = shot.start;
-			else video.pause();
-		}
-		this.syncPlayhead(video.currentTime);
+		});
 	}
 
 	/**
@@ -536,13 +532,9 @@ export class CinemaClipView extends ItemView {
 			this.playheadEl.style.left = `${Math.min(100, Math.max(0, (time / duration) * 100))}%`;
 
 		const found = shots.findIndex((s) => time >= s.start && time < s.end);
-		if (found >= 0 && found !== this.activeIndex) {
-			// A playhead that walked out of the confined segment means the user
-			// scrubbed away from it; confinement should not drag them back.
-			if (this.confined && this.confined.index !== found)
-				this.confined = null;
-			this.setActive(found);
-		}
+		// Scrubbing out of a confined segment releases it inside the player,
+		// so the highlight only has to follow.
+		if (found >= 0 && found !== this.activeIndex) this.setActive(found);
 	}
 
 	private setActive(index: number | null): void {
@@ -630,12 +622,8 @@ export class CinemaClipView extends ItemView {
 
 	// --- detection --------------------------------------------------------
 
-	private async detect(
-		item: MediaItem,
-		detector: Detector,
-		force: boolean,
-	): Promise<void> {
-		if (detector === 'transnet' && !(await this.plugin.shots.hasModel())) {
+	private async detect(item: MediaItem, force: boolean): Promise<void> {
+		if (!(await this.plugin.shots.hasModel())) {
 			new Notice(
 				'Cinema canvas: the TransNetV2 model is not downloaded yet. Settings → Shot detection → Download.',
 				10000,
@@ -643,13 +631,13 @@ export class CinemaClipView extends ItemView {
 			return;
 		}
 		this.render();
-		const shots = await this.plugin.shots.detect(item, detector, force);
+		const shots = await this.plugin.shots.detect(item, force);
 		if (!shots) {
-			const reason = this.plugin.shots.errorFor(item, detector);
+			const reason = this.plugin.shots.errorFor(item);
 			new Notice(
 				reason
-					? `Cinema canvas: ${DETECTOR_LABELS[detector]} failed on ${item.file.name}. ${reason}`
-					: `Cinema canvas: ${DETECTOR_LABELS[detector]} found no cuts in ${item.file.name} — it may be a single take.`,
+					? `Cinema canvas: ${DETECTOR_LABEL} failed on ${item.file.name}. ${reason}`
+					: `Cinema canvas: ${DETECTOR_LABEL} found no cuts in ${item.file.name} — it may be a single take.`,
 				12000,
 			);
 		}

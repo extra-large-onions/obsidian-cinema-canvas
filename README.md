@@ -121,15 +121,15 @@ Release artifacts are `main.js`, `manifest.json` and `styles.css`.
 
 `onnxruntime-node` is a runtime dependency, not a bundled one: it is a native
 N-API addon, so `node_modules/onnxruntime-node/` has to stay next to `main.js`.
-Only TransNetV2 needs it — everything else works without it.
+Only TransNetV2 and the sound view need it — everything else works without it.
 
 It has to be loaded with `require`, and by **absolute path**. Obsidian evaluates
 `main.js` in the renderer, so the `require` in scope is Electron's, and its
 resolution paths are rooted at Obsidian's own program directory: a bare
 `require('onnxruntime-node')` walks up from there, never looks inside the plugin
-folder, and fails with `MODULE_NOT_FOUND`. `ShotIndex.runtimeDir()` resolves the
-plugin folder through `FileSystemAdapter.getFullPath`, and the runtime is loaded
-from `<plugin>/node_modules/onnxruntime-node`. A dynamic `import()` fails a
+folder, and fails with `MODULE_NOT_FOUND`. The plugin folder is resolved through
+`FileSystemAdapter.getFullPath`, and `loadOrt` in `src/media/onnx.ts` loads the
+runtime from `<plugin>/node_modules/onnxruntime-node`. A dynamic `import()` fails a
 second way: esbuild leaves it as a real ESM import, which the renderer resolves
 against the page URL.
 
@@ -145,17 +145,24 @@ src/
     scope.ts            folder list -> recursive path matcher
     media-index.ts      live index + vault-event reconciliation
     thumbnails.ts       tiered, disk-cached proxy generation + priority queue
-    shots.ts            detector queue, candidate cache, pure shot building
+    shots.ts            detection queue, candidate cache, pure shot building
     transnet.ts         TransNetV2 inference over an ffmpeg rawvideo pipe
+    onnx.ts             onnxruntime-node loader and session cache, shared
+    sound.ts            sound analysis queue, cache, pinned model download
+    sound-analysis.ts   Silero VAD + PANNs + loudness over one decode; lanes
+    audioset-labels.ts  the 527 AudioSet class names PANNs scores
   view/
     canvas-view.ts      the ItemView: virtualized render, selection, controls
     layout.ts           pure layout: groups -> packed world rects
     viewport.ts         pan/zoom camera and input
     spatial-index.ts    bucket grid for visibility queries
     media-cell.ts       one cell: element, thumbnail request, hover preview
-    shot-strip.ts       the sticky bottom strip: one scrolling row of shots
-    shot-controls.ts    cutting sliders + detector buttons, shared by both views
+    shot-strip.ts       the sticky bottom strip: cuts and sound, as two tabs
+    shot-controls.ts    cutting sliders + Find cuts, shared by both shot views
     clip-view.ts        one tab per clip: player, rhythm ribbon, segment grid
+    segment-player.ts   frame-accurate segment playback, shared by every player
+    sound-view.ts       one tab per file: dialogue, music, effects, silence lanes
+    sound-lanes.ts      lane colours and canvas drawing, shared by strip + view
     lightbox.ts         full-screen viewer
 ```
 
@@ -163,69 +170,62 @@ src/
 
 0-BSD
 
-## Shots
+## The strip
 
-Select a clip and the **shot strip** appears along the bottom of the view: one
-thumbnail per cut, scrolling sideways, with the clip's shot count, average shot
-length, and its shortest and longest shot in the header. Under each thumbnail is
-where that shot starts and how long it runs.
+Select a clip and the **strip** appears along the bottom of the view, with two
+tabs over one body — the two questions worth asking about a clip you are looking
+at from the outside:
 
-An uncut clip gets **two Find cuts buttons** instead, because there are two
-detectors and they are good at different things:
+- **Cuts** — one thumbnail per cut, scrolling sideways, with the clip's shot
+  count, average shot length, and its shortest and longest shot in the header.
+  Under each thumbnail is where that shot starts and how long it runs.
+- **Sound** — the same four lanes the sound view draws, across the whole clip.
+  Hover to read a moment, click to play from there.
 
-| | ffmpeg | TransNetV2 |
-| --- | --- | --- |
-| What it is | the `scdet` filter | a small neural network |
-| Speed, per 6 min of 720p | ~6 s | ~80 s |
-| On the reference clip | 82 cuts | 62 cuts |
-| Fooled by | handheld movement, flashes | much less |
-| Needs | nothing extra | a 31 MB model file |
-
-Once both have run on a clip the two buttons become a switch: the one that is not
-showing swaps in instantly, because the candidates for both are cached side by
-side. The header says whose cuts you are looking at.
+Each tab carries a **dot** when its own side has never been run for this clip, so
+you can see there is nothing there without switching to find out. Whichever side
+is empty offers the one button that fills it: **Find cuts**, or **Analyse
+sound**. Both tabs also carry the button that opens the same thing in a tab of
+its own, for when the strip is too small for what you are looking at.
 
 The canvas above never changes — it stays one cell per file, so "which file is
-this" and "where in the file is this" stay two separate questions.
+this" and "what is inside it" stay two separate questions.
 
 Clips are never split on disk. A shot is a start and end time against the
 original file, so a 40-shot scene is one file and forty seeks. As everywhere else
 in this plugin, nothing is written to the vault: shot lists cache to
-`<plugin folder>/shots/`, keyed by path + size + mtime + detector, so they
-survive restarts and invalidate themselves when you re-export.
+`<plugin folder>/shots/`, keyed by path + size + mtime, so they survive restarts
+and invalidate themselves when you re-export.
 
 | Action | Mouse | Key |
 | --- | --- | --- |
 | Play one shot in its canvas cell | click a strip item | `Shift+←` `Shift+→` |
 | Open one shot full screen | double-click a strip item | — |
 | Show or hide the strip | toolbar | `S` |
-| Switch detector, or run the other one | the two buttons in the strip | — |
-| Re-run the current detector | the refresh button in the strip | — |
+| Switch between cuts and sound | the two tabs in the strip | — |
+| Find the cuts, or analyse the sound | the button on the empty tab | — |
+| Re-run either one | the refresh button in the strip | — |
 | Change how the clip is cut | the two sliders in the strip header | — |
 | Open the clip's own tab | the segments button in the strip header | — |
+| Open the clip's sound tab | the waveform button in the strip header | — |
 
-- **ffmpeg** must be on your system for either detector — TransNetV2 still reads
-  its frames through it. Leave **ffmpeg path** empty to use whatever is on
-  `PATH`, and use **Check** to confirm it runs. This is why the plugin is
-  desktop-only.
+**ffmpeg** must be on your system for both halves — TransNetV2 reads its frames
+through it, and the sound analysis reads its audio the same way. Leave **ffmpeg
+path** empty to use whatever is on `PATH`, and use **Check** to confirm it runs.
+This is why the plugin is desktop-only.
+
 The cutting parameters live in the strip header, not in settings, because the
 strip is their readout — you drag and the shots under your hand rearrange:
 
-- **Sensitivity** (ffmpeg, 1–20) is how far a frame must differ from the one
-  before it. Lower finds more cuts and more false ones. Expect to tune it per
-  title.
-- **Confidence** (TransNetV2, 5–95%) is how sure the network has to be. 50 is
-  what its authors use. The network is far more decisive than `scdet`, so this
-  moves the count much less — on the reference clip 5% gives 88 shots and 75%
-  gives 58.
+- **Confidence** (5–95%) is how sure TransNetV2 has to be that a frame is a cut.
+  50 is what its authors use. The network is decisive, so this moves the count
+  much less than its range suggests — on the reference clip 5% gives 88 shots
+  and 75% gives 58.
 - **Min shot** ignores a cut that falls too soon after the one before it, which
-  is what stops a single dissolve becoming three shots. It applies to both.
+  is what stops a single dissolve becoming three shots.
 
-Only the threshold of the detector currently showing is offered; the other one
-would change a list that is not on screen.
-
-**Every one of them re-cuts the clip instantly.** Each detector is asked once for
-every frame scoring at least 1, and the threshold is applied to that cached list
+**Both of them re-cut the clip instantly.** The network is asked once for every
+frame scoring at least 1, and the confidence is applied to that cached list
 afterwards — so tuning is a slider, not a re-scan. Verified: the cached candidate
 list and a full per-frame dump produce identical shot lists at every threshold
 above the floor.
@@ -250,9 +250,16 @@ scrub the player past a cut and the highlight moves with it. Clicking a segment
 confines playback to it — it repeats or pauses at its last frame, depending on
 the loop button — and scrubbing out of it releases that.
 
-The same sliders and detector buttons are in this view's header, doing the same
-thing. Changing a parameter here re-cuts the clip without touching the player,
-which is the point: the frame stays where it is while the cuts around it move.
+Segments stop **on their own last frame**, in every player — the clip view, the
+lightbox, and a canvas cell. The boundary is judged once per presented frame
+with `requestVideoFrameCallback`, not on `timeupdate`, which Chromium fires about
+every 250 ms: checked that way, the same 82 segments ran on for 4 frames of the
+next shot on average and 8 at worst.
+
+The same sliders and the same Find cuts button are in this view's header, doing
+the same thing. Changing a parameter here re-cuts the clip without touching the
+player, which is the point: the frame stays where it is while the cuts around it
+move.
 
 | Action | Mouse | Key |
 | --- | --- | --- |
@@ -262,23 +269,32 @@ which is the point: the frame stays where it is while the cuts around it move.
 | Repeat the segment | the loop button | `L` |
 | Full screen player | the expand button | `F` |
 
-### How ffmpeg detects cuts
+### Why ffmpeg no longer finds the cuts
 
-ffmpeg has exactly one cut detector and exactly one knob on it. The `scdet`
-filter compares each frame to the one before it, takes the mean absolute
-difference of the luma plane, and scores the frame on how much that difference
-*changed*. Scoring the change rather than the difference is what makes it ignore
-steady camera movement — a long pan differs a lot from frame to frame, but by a
-consistent amount.
+Earlier versions offered a second detector: ffmpeg's `scdet` filter, which
+compares each frame to the one before it and scores how much that difference
+*changed*. It was about fourteen times faster, and it was dropped anyway.
 
-The older `select='gt(scene,X)'` form is the same computation on a 0–1 scale
-instead of 0–100, and the cuts one finds are a strict subset of the other's.
-There is no second algorithm inside ffmpeg to switch to.
+Scoring the change rather than the difference is what let it ignore steady
+camera movement — a long pan differs a lot from frame to frame, but by a
+consistent amount. What it could not see was a dissolve, because no single frame
+across one differs much from its neighbour. What it saw that was not there was
+movement sharp enough to look like a change in the rate of change: a handheld
+jolt, a whip pan, a muzzle flash. On the reference clip that was 21 false cuts,
+all of them inside three handheld passages. There was no second algorithm inside
+ffmpeg to switch to — the older `select='gt(scene,X)'` form is the same
+computation on a 0–1 scale, and finds a strict subset of the same cuts.
 
-What it cannot see is a dissolve, because no single frame across one differs much
-from its neighbour. What it sees that is not there is camera movement sharp
-enough to look like a change in the rate of change — a handheld jolt, a whip pan,
-a muzzle flash.
+A strip you have to eyeball is worth less than one you can trust, so the choice
+itself was removed rather than left as a faster wrong answer. ffmpeg is still
+required — it decodes the frames TransNetV2 reads, and the audio the sound view
+reads.
+
+**Cache files written by the old detector are ignored**, not migrated: `scdet`
+scored frames 1–20 and the network scores probability × 100, so reading one at
+the network's 50% confidence would quietly report a feature film as a single
+take. A clip that was only ever cut with ffmpeg shows as uncut until TransNetV2
+runs on it.
 
 ### How TransNetV2 detects cuts
 
@@ -289,7 +305,8 @@ camera move: it has seen what happens either side. It was trained on labelled
 cuts, so it answers the question directly instead of inferring it from a
 frame-difference statistic.
 
-On the 370-second reference clip, against `scdet` at sensitivity 4:
+On the 370-second reference clip, measured against `scdet` at sensitivity 4
+while both detectors still existed:
 
 - It confirmed **62** of ffmpeg's 82 cuts.
 - It **rejected 21**, every one of them inside three handheld passages.
@@ -298,8 +315,7 @@ On the 370-second reference clip, against `scdet` at sensitivity 4:
   this footage just does not use them.
 
 So on hard-cut material it is a false-positive filter rather than a source of
-extra cuts. That is still the difference between a strip you can trust and one
-you have to eyeball.
+extra cuts. That difference is why it is now the only detector.
 
 It needs a 31 MB ONNX file, downloaded once from Hugging Face with the
 **Download** button in settings, into `<plugin folder>/models/`. Inference runs
@@ -314,3 +330,84 @@ decode; you only need it if the file itself changed.
 Playing a shot from the strip plays only that shot and stops at the cut. In the
 full-screen viewer, playback is confined to the shot but scrubbing is not —
 seeing what surrounds a shot is usually the point of opening it big.
+
+## Sound
+
+The shot views ask where the picture changes. The **sound view** asks what you
+are hearing: where the score comes in, how long a scene goes without a line,
+where the mix drops out. It is built for whole films, which are usually not on
+the canvas at all, so it opens from anywhere a file is:
+
+- right-click any video or audio file → **Open in sound view**
+- **Open current file in the sound view** in the command palette
+- the waveform button on the strip's Sound tab, or in the clip view
+
+The strip's Sound tab draws the same lanes for a clip you are looking at on the
+canvas. This view is what a whole film gets: the lanes to scale across the full
+running time, a zoomable detail set under the playhead, and the lists.
+
+A film's audio is one mixed track, so dialogue, music and effects are rarely
+heard alone. Each is its own **lane**, and any number can be on at once.
+
+| Lane | From | Judged every |
+| --- | --- | --- |
+| Loudness | RMS level | 100 ms |
+| Dialogue | Silero VAD, a dedicated speech detector | 32 ms |
+| Music | PANNs CNN14, its music and singing classes | 1 s, over 2 s |
+| Effects | PANNs, anything audible that is neither of the above | 1 s, over 2 s |
+| Silence | quieter than the threshold for at least 0.5 s | 100 ms |
+
+The tab holds the player, the **whole film** as one strip of lanes, a **detail**
+set of lanes following the playhead (scroll over it to zoom from 10 s to 30 min),
+and three lists: music cues, silences over a second, and stretches of 30 s or
+more without dialogue. Hovering the lanes names the three sounds PANNs was most
+sure of at that second. Click a lane or a list row to jump there.
+
+| Action | Key |
+| --- | --- |
+| Play / pause | `Space` |
+| Back / forward 5 s (30 s with `Shift`) | `←` `→` |
+| Zoom the detail lanes | `+` / `-`, or scroll |
+| Full screen, lanes and all | `f` |
+
+The **expand** button, or `f`, takes the whole view full screen: the player takes
+the room the header and the lists were using, and the lanes stay under it. The
+player's own full screen button is the browser's, and shows only the picture — a
+fullscreened video element sits above everything else in the compositor, so
+nothing can be drawn over it.
+
+**Three sliders** — silence level, dialogue confidence, music confidence — live in
+the header and re-label the film instantly: the readings are cached, not the
+lanes, exactly as shots cache candidates rather than cuts.
+
+### Models
+
+Two networks run on this machine, downloaded once into `<plugin>/models/` from
+the **Download models** button the view shows the first time (330 MB, about 40 s
+on a fast connection):
+
+- **Silero VAD v6.2.1** (2.3 MB, MIT), from the authors' repository
+- **PANNs CNN14, 16 kHz** (327 MB, MIT; Kong et al., 2020), an ONNX export
+  published on Hugging Face as a graph plus external weights
+
+Both URLs are pinned to a fixed revision, and each file is streamed to disk and
+only installed if its size and SHA-256 match the exact files the analysis was
+verified with. A mismatch installs nothing.
+
+### Speed and accuracy
+
+Measured on a 185 s test track of known content — synthesised speech, digital
+silence, solo piano, rain and thunder, gunshots, and speech over piano at −12 dB:
+
+- **175 of 185 seconds** labelled exactly right at the default thresholds. Most
+  misses were real pauses between sentences, which the lanes call silence and the
+  hand-written truth did not; three were piano too quiet under the speech to
+  register.
+- **14 s** of wall time on the CPU, which is about **9 minutes for a two-hour
+  film**. The CPU is used rather than DirectML on purpose: the runs are small,
+  and a 2 s window measured 42 ms on the CPU against 298 ms through the GPU.
+- The cache is about **0.6 MB per two-hour film**, in `<plugin>/sound/`, keyed by
+  path + size + mtime. Re-labelling a two-hour film for a slider takes about 6 ms.
+
+The first audio track is analysed, which on a film with a commentary is the main
+mix. **Clear sound analysis** is a command.

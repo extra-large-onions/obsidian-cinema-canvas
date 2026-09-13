@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { loadOrt, loadSession } from './onnx';
 import type { Candidate } from './shots';
 
 /**
@@ -57,123 +58,6 @@ export interface TransNetRequest {
 	onProgress?: (fraction: number) => void;
 }
 
-// --- the slice of onnxruntime-node this file uses -------------------------
-// Declared structurally rather than imported, so the plugin still type-checks
-// and builds on a machine that has never installed the runtime.
-
-interface OrtTensor {
-	data: Float32Array;
-}
-
-interface OrtSession {
-	outputNames: string[];
-	run(feeds: Record<string, OrtTensor>): Promise<Record<string, OrtTensor>>;
-}
-
-interface OrtModule {
-	Tensor: new (
-		type: 'float32',
-		data: Float32Array,
-		dims: number[],
-	) => OrtTensor;
-	InferenceSession: {
-		create(path: string, options?: unknown): Promise<OrtSession>;
-	};
-}
-
-let ortModule: OrtModule | null = null;
-
-declare const require: ((id: string) => unknown) | undefined;
-
-/**
- * Loads onnxruntime-node out of the plugin's own `node_modules`, by absolute
- * path.
- *
- * The path is the whole point. Obsidian evaluates `main.js` in the renderer,
- * so the `require` in scope is Electron's, and its resolution paths are rooted
- * at Obsidian's own program directory — a bare `require('onnxruntime-node')`
- * walks up from there and never looks inside the plugin folder, failing with
- * MODULE_NOT_FOUND. An absolute path skips resolution entirely. (A dynamic
- * `import()` is worse still: esbuild leaves it as a real ESM import, which the
- * renderer resolves against the page URL.)
- *
- * The bare name is still tried afterwards, for the case where the package has
- * been hoisted somewhere Obsidian can see.
- */
-function loadOrt(runtimeDir: string): OrtModule {
-	if (ortModule) return ortModule;
-	const load =
-		typeof require === 'function'
-			? require
-			: (window as unknown as { require?: (id: string) => unknown }).require;
-	if (!load)
-		throw new Error(
-			'Node require is unavailable in this Obsidian build, so onnxruntime-node cannot be loaded.',
-		);
-	const candidates = [
-		`${runtimeDir.replace(/\\/g, '/')}/node_modules/onnxruntime-node`,
-		'onnxruntime-node',
-	];
-	const failures: string[] = [];
-	for (const id of candidates) {
-		try {
-			const mod = load(id) as OrtModule & { default?: OrtModule };
-			ortModule = mod.default ?? mod;
-			return ortModule;
-		} catch (err) {
-			failures.push(`${id}: ${messageOf(err)}`);
-		}
-	}
-	throw new Error(
-		`onnxruntime-node could not be loaded. Run \`npm install\` in the plugin folder. (${failures.join(' | ')})`,
-	);
-}
-
-function messageOf(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
-
-const sessions = new Map<string, Promise<OrtSession>>();
-
-async function loadSession(
-	modelPath: string,
-	runtimeDir: string,
-): Promise<OrtSession> {
-	const existing = sessions.get(modelPath);
-	if (existing) return existing;
-	const created = (async () => {
-		const ort = loadOrt(runtimeDir);
-		// DirectML runs on any Direct3D 12 GPU, the integrated one included,
-		// and was measured 3.7x faster than the CPU provider with identical
-		// output. Falling back is not an error worth reporting.
-		try {
-			return await ort.InferenceSession.create(modelPath, {
-				executionProviders: ['dml', 'cpu'],
-				graphOptimizationLevel: 'all',
-			});
-		} catch {
-			return await ort.InferenceSession.create(modelPath, {
-				executionProviders: ['cpu'],
-				graphOptimizationLevel: 'all',
-			});
-		}
-	})();
-	sessions.set(modelPath, created);
-	try {
-		return await created;
-	} catch (err) {
-		// A failed load must not be cached, or fixing the model path would
-		// need a restart.
-		sessions.delete(modelPath);
-		throw err;
-	}
-}
-
-/** Drops every loaded model. Called when the plugin unloads. */
-export function releaseModels(): void {
-	sessions.clear();
-}
-
 const DURATION_LINE = /Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/;
 const FPS_LINE = /,\s*([\d.]+)\s*fps\b/;
 
@@ -187,7 +71,12 @@ const FPS_LINE = /,\s*([\d.]+)\s*fps\b/;
 export async function detectWithTransNet(
 	request: TransNetRequest,
 ): Promise<TransNetResult> {
-	const session = await loadSession(request.modelPath, request.runtimeDir);
+	// DirectML runs on any Direct3D 12 GPU, the integrated one included,
+	// and was measured 3.7x faster than the CPU provider with identical
+	// output for this model's 100-frame window.
+	const session = await loadSession(request.modelPath, request.runtimeDir, {
+		providers: ['dml', 'cpu'],
+	});
 	const ort = loadOrt(request.runtimeDir);
 
 	const child = spawn(
@@ -334,7 +223,13 @@ export function peaks(
 		// exactly one frame out of a plateau of equal values.
 		if (score <= before || score < after) continue;
 		candidates.push({
-			time: Math.round((i / fps) * 1000) / 1000,
+			// TransNetV2 marks the last frame of the outgoing shot; its authors'
+			// own scene splitter puts the marked frame at the end of the earlier
+			// scene. A cut here is the first frame of the incoming shot, which
+			// is what scdet reports and what a segment's `start` has to be —
+			// measured, 60 of the 62 cuts both detectors found sat exactly one
+			// frame before scdet's until this was added.
+			time: Math.round(((i + 1) / fps) * 1000) / 1000,
 			score: Math.round(score * 100) / 100,
 		});
 	}

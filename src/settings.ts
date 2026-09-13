@@ -34,27 +34,33 @@ export interface CinemaCanvasSettings {
 	/** ffmpeg binary; empty means whatever is on PATH. */
 	ffmpegPath: string;
 	/**
-	 * scdet score a frame must reach to count as a cut, 1-20.
-	 *
-	 * Default 4. Measured over every frame of a 370 s 720p clip: the median
-	 * frame scores 0.07 and the 99th percentile is 5.2, so the old default of
-	 * 10 sat above almost every frame in the file and found 25 shots where 4
-	 * finds 82.
-	 */
-	shotThreshold: number;
-	/**
 	 * TransNetV2 probability x100 a frame must reach to count as a cut, 5-95.
 	 *
 	 * Default 50, which is the threshold the model's authors use. The network
-	 * is far more decisive than scdet — on a 370 s clip only 65 of 11090 frames
-	 * scored over 0.5 and only 102 scored over 0.1 — so this slider moves the
-	 * shot count much less than the ffmpeg one does.
+	 * is decisive — on a 370 s clip only 65 of 11090 frames scored over 0.5 and
+	 * only 102 scored over 0.1 — so this slider moves the shot count much less
+	 * than its range suggests.
 	 */
 	transnetThreshold: number;
 	/** Absolute path to a TransNetV2 ONNX file; empty means the plugin's own. */
 	transnetModelPath: string;
 	/** Cuts closer together than this many seconds are ignored. */
 	minShotLength: number;
+
+	/**
+	 * RMS level under which the sound view calls a moment silent, dBFS.
+	 *
+	 * Default -50. A film is almost never digitally silent — its quiet is room
+	 * tone — so 0-referenced "silence" would find none at all.
+	 */
+	soundSilenceDb: number;
+	/** Speech probability x100 for the dialogue lane; 50 is Silero's own. */
+	soundDialogue: number;
+	/**
+	 * Music score x100 for the music lane. Default 30: on the test track, solo
+	 * piano scored 78-86 and speech alone at most 5.
+	 */
+	soundMusic: number;
 }
 
 export const DEFAULT_SETTINGS: CinemaCanvasSettings = {
@@ -81,10 +87,13 @@ export const DEFAULT_SETTINGS: CinemaCanvasSettings = {
 	thumbnailQuality: 0.8,
 
 	ffmpegPath: '',
-	shotThreshold: 4,
 	transnetThreshold: 50,
 	transnetModelPath: '',
 	minShotLength: 0.4,
+
+	soundSilenceDb: -50,
+	soundDialogue: 50,
+	soundMusic: 30,
 };
 
 const HEIGHT_PRESETS: Record<string, string> = {
@@ -298,14 +307,14 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Shot detection')
 			.setDesc(
-				'Select a clip on the canvas and press one of the two Find cuts buttons in the strip along the bottom. The sliders that shape the cutting live in that strip too, next to the shots they change. Nothing is written to the vault and the clip is never split on disk — a shot is only a start and end time against the original file.',
+				'Select a clip on the canvas and press Find cuts in the strip along the bottom. The sliders that shape the cutting live in that strip too, next to the shots they change. Nothing is written to the vault and the clip is never split on disk — a shot is only a start and end time against the original file.',
 			)
 			.setHeading();
 
 		new Setting(containerEl)
 			.setName('ffmpeg path')
 			.setDesc(
-				'Leave empty to use whatever is on PATH. Use the check button to confirm it runs.',
+				'Used to decode frames for shot detection and audio for the sound view. Leave empty to use whatever is on PATH. Use the check button to confirm it runs.',
 			)
 			.addText((t) =>
 				t
@@ -330,7 +339,7 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('TransNetV2 model')
 			.setDesc(
-				'The second Find cuts button runs a trained network instead of ffmpeg: about fourteen times slower, and it rejects the false cuts that camera movement produces. It needs a 31 MB model file, downloaded once into the plugin folder. Leave the path empty to use that copy.',
+				'Cuts are found by a trained network, which needs a 31 MB model file downloaded once into the plugin folder. Leave the path empty to use that copy.',
 			)
 			.addText((t) =>
 				t
@@ -349,7 +358,7 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 					b.setButtonText('Download').setDisabled(false);
 					new Notice(
 						ok
-							? 'TransNetV2 model downloaded. The second Find cuts button works now.'
+							? 'TransNetV2 model downloaded. Find cuts works now.'
 							: 'The model could not be downloaded. Check the connection, or fetch it by hand and point the path at it.',
 						ok ? 5000 : 10000,
 					);

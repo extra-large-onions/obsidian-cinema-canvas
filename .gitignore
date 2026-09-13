@@ -27,5 +27,8 @@ thumbs/
 # Generated shot cache
 shots/
 
-# Downloaded TransNetV2 weights (31 MB)
+# Generated sound analysis cache
+sound/
+
+# Downloaded model weights: TransNetV2 (31 MB), Silero VAD and PANNs (330 MB)
 models/

@@ -120,17 +120,32 @@ export class CinemaCanvasView extends ItemView {
 		this.strip = new ShotStrip(
 			root,
 			this.plugin.shots,
+			this.plugin.sound,
 			this.plugin.thumbnails,
 			{
 				onPlayShot: (item, shot) => this.playShot(item, shot),
 				onOpenShot: (item, shot) => this.openShot(item, shot),
 				onOpenClip: (item) => void this.plugin.openClip(item),
+				onOpenSound: (item) => void this.plugin.openSound(item.file),
+				onSeek: (item, time, duration) =>
+					this.playShot(item, {
+						index: 0,
+						start: time,
+						end: duration,
+						score: 0,
+					}),
 				getParams: () => ({
-					shotThreshold: this.plugin.settings.shotThreshold,
 					transnetThreshold: this.plugin.settings.transnetThreshold,
 					minShotLength: this.plugin.settings.minShotLength,
 				}),
 				setParam: (key, value) => this.plugin.setShotParam(key, value),
+				getSoundParams: () => ({
+					soundSilenceDb: this.plugin.settings.soundSilenceDb,
+					soundDialogue: this.plugin.settings.soundDialogue,
+					soundMusic: this.plugin.settings.soundMusic,
+				}),
+				setSoundParam: (key, value) =>
+					this.plugin.setSoundParam(key, value),
 			},
 		);
 

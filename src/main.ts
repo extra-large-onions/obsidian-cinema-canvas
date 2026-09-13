@@ -1,25 +1,47 @@
-import { Notice, Plugin, WorkspaceLeaf } from 'obsidian';
+import { Notice, Plugin, TFile, WorkspaceLeaf } from 'obsidian';
+import {
+	DEFAULT_VIDEO_EXTENSIONS,
+	parseExtensionList,
+} from './media/extensions';
 import { MediaIndex } from './media/media-index';
 import { ShotIndex } from './media/shots';
+import { SoundIndex } from './media/sound';
+import type { SoundParamKey } from './media/sound-analysis';
 import { ThumbnailStore } from './media/thumbnails';
 import {
 	CinemaCanvasSettings,
 	CinemaCanvasSettingTab,
 	DEFAULT_SETTINGS,
 } from './settings';
-import type { Detector, ShotOptions } from './media/shots';
-import { DETECTOR_LABELS } from './media/shots';
+import type { ShotOptions } from './media/shots';
+import { DETECTOR_LABEL } from './media/shots';
 import { debounce } from './utils/debounce';
 import { CinemaCanvasView, VIEW_TYPE_CINEMA_CANVAS } from './view/canvas-view';
 import { CinemaClipView, VIEW_TYPE_CINEMA_CLIP } from './view/clip-view';
+import { CinemaSoundView, VIEW_TYPE_CINEMA_SOUND } from './view/sound-view';
 import type { ShotParamKey } from './view/shot-controls';
 import type { MediaItem } from './types';
+
+/** Audio-only formats the sound view accepts on top of every video format. */
+const SOUND_ONLY_EXTENSIONS = [
+	'mp3',
+	'wav',
+	'flac',
+	'm4a',
+	'aac',
+	'ogg',
+	'oga',
+	'opus',
+	'aiff',
+	'aif',
+];
 
 export default class CinemaCanvasPlugin extends Plugin {
 	settings!: CinemaCanvasSettings;
 	index!: MediaIndex;
 	thumbnails!: ThumbnailStore;
 	shots!: ShotIndex;
+	sound!: SoundIndex;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -42,6 +64,11 @@ export default class CinemaCanvasPlugin extends Plugin {
 		this.shots = new ShotIndex(this.app, pluginDir, this.shotOptions());
 		this.addChild(this.shots);
 
+		this.sound = new SoundIndex(this.app, pluginDir, {
+			ffmpegPath: this.settings.ffmpegPath,
+		});
+		this.addChild(this.sound);
+
 		this.registerView(
 			VIEW_TYPE_CINEMA_CANVAS,
 			(leaf) => new CinemaCanvasView(leaf, this),
@@ -50,6 +77,25 @@ export default class CinemaCanvasPlugin extends Plugin {
 		this.registerView(
 			VIEW_TYPE_CINEMA_CLIP,
 			(leaf) => new CinemaClipView(leaf, this),
+		);
+
+		this.registerView(
+			VIEW_TYPE_CINEMA_SOUND,
+			(leaf) => new CinemaSoundView(leaf, this),
+		);
+
+		// A film is usually not on the canvas at all — it is one big file in a
+		// folder of its own — so the sound view is offered wherever a file is.
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (!(file instanceof TFile) || !this.isSoundFile(file)) return;
+				menu.addItem((entry) =>
+					entry
+						.setTitle('Open in sound view')
+						.setIcon('audio-waveform')
+						.onClick(() => void this.openSound(file)),
+				);
+			}),
 		);
 
 		this.addRibbonIcon('clapperboard', 'Open cinema canvas', () => {
@@ -69,7 +115,11 @@ export default class CinemaCanvasPlugin extends Plugin {
 		// The vault file list is only complete once the layout is ready, and
 		// scanning earlier would miss files or block startup.
 		this.app.workspace.onLayoutReady(() => {
-			void Promise.all([this.thumbnails.init(), this.shots.init()]).then(
+			void Promise.all([
+				this.thumbnails.init(),
+				this.shots.init(),
+				this.sound.init(),
+			]).then(
 				() => {
 					this.index.rebuild();
 					if (this.settings.openOnStartup) void this.activateView();
@@ -124,6 +174,53 @@ export default class CinemaCanvasPlugin extends Plugin {
 	}
 
 	/**
+	 * Opens the soundtrack of one file in its own tab.
+	 *
+	 * Like `openClip`, a file already open is revealed rather than opened
+	 * twice; like the file menu, any audio or video file will do, on the
+	 * canvas or not.
+	 */
+	async openSound(file: TFile): Promise<void> {
+		if (!this.isSoundFile(file)) {
+			new Notice('Cinema canvas: the sound view needs an audio or video file.');
+			return;
+		}
+		const { workspace } = this.app;
+		for (const leaf of workspace.getLeavesOfType(VIEW_TYPE_CINEMA_SOUND)) {
+			if (leaf.getViewState().state?.path !== file.path) continue;
+			await workspace.revealLeaf(leaf);
+			return;
+		}
+		const leaf = workspace.getLeaf('tab');
+		await leaf.setViewState({
+			type: VIEW_TYPE_CINEMA_SOUND,
+			active: true,
+			state: { path: file.path },
+		});
+		await workspace.revealLeaf(leaf);
+	}
+
+	/** Anything ffmpeg can pull an audio track out of, as far as the name says. */
+	isSoundFile(file: TFile): boolean {
+		const extension = file.extension.toLowerCase();
+		return (
+			SOUND_ONLY_EXTENSIONS.includes(extension) ||
+			DEFAULT_VIDEO_EXTENSIONS.includes(extension) ||
+			parseExtensionList(this.settings.extraVideoExtensions).includes(
+				extension,
+			)
+		);
+	}
+
+	/** Applies one sound threshold from the sound view; see `setShotParam`. */
+	setSoundParam(key: SoundParamKey, value: number): void {
+		if (this.settings[key] === value) return;
+		this.settings[key] = value;
+		this.sound.retune();
+		this.saveShotParams();
+	}
+
+	/**
 	 * Applies one cutting parameter from the shot strip.
 	 *
 	 * The strip owns these rather than the settings tab, because the clip in
@@ -161,6 +258,7 @@ export default class CinemaCanvasPlugin extends Plugin {
 			enabled: this.settings.useThumbnails,
 		});
 		this.shots.setOptions(this.shotOptions());
+		this.sound.setOptions({ ffmpegPath: this.settings.ffmpegPath });
 		if (reindex) this.index.applySettings(this.settings);
 		else for (const view of this.canvasViews()) view.refreshSettings();
 	}
@@ -168,7 +266,6 @@ export default class CinemaCanvasPlugin extends Plugin {
 	private shotOptions(): ShotOptions {
 		return {
 			ffmpegPath: this.settings.ffmpegPath,
-			threshold: this.settings.shotThreshold,
 			transnetThreshold: this.settings.transnetThreshold,
 			minShotLength: this.settings.minShotLength,
 			modelPath: this.settings.transnetModelPath,
@@ -223,14 +320,29 @@ export default class CinemaCanvasPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'detect-shots',
-			name: 'Detect shots in all clips with ffmpeg',
-			callback: () => void this.detectShots('ffmpeg'),
+			name: 'Detect shots in all clips',
+			callback: () => void this.detectShots(),
 		});
 
 		this.addCommand({
-			id: 'detect-shots-transnet',
-			name: 'Detect shots in all clips with TransNetV2',
-			callback: () => void this.detectShots('transnet'),
+			id: 'open-sound-active-file',
+			name: 'Open current file in the sound view',
+			checkCallback: (checking: boolean) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || !this.isSoundFile(file)) return false;
+				if (!checking) void this.openSound(file);
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'clear-sound-cache',
+			name: 'Clear sound analysis',
+			callback: () => {
+				void this.sound.clear().then(() => {
+					new Notice('Cinema canvas: sound analysis cleared');
+				});
+			},
 		});
 
 		this.addCommand({
@@ -265,6 +377,11 @@ export default class CinemaCanvasPlugin extends Plugin {
 			if (selected) void this.openClip(selected);
 		});
 
+		viewCommand('open-sound', 'Open selected clip in the sound view', (v) => {
+			const selected = v.selectedItem();
+			if (selected) void this.openSound(selected.file);
+		});
+
 		viewCommand('fit-all', 'Fit all items', (v) => v.fitAll());
 		viewCommand('zoom-to-current', 'Zoom to current item', (v) =>
 			v.zoomToCurrent(),
@@ -282,13 +399,8 @@ export default class CinemaCanvasPlugin extends Plugin {
 		);
 		viewCommand(
 			'detect-shots-selected',
-			'Detect shots in the selected clip with ffmpeg',
-			(v) => void this.detectSelectedShots(v, 'ffmpeg'),
-		);
-		viewCommand(
-			'detect-shots-selected-transnet',
-			'Detect shots in the selected clip with TransNetV2',
-			(v) => void this.detectSelectedShots(v, 'transnet'),
+			'Detect shots in the selected clip',
+			(v) => void this.detectSelectedShots(v),
 		);
 	}
 
@@ -299,16 +411,13 @@ export default class CinemaCanvasPlugin extends Plugin {
 	 * the result. Re-running the whole vault to judge one setting is what makes
 	 * that unbearable, so this always forces, even when a list is cached.
 	 */
-	private async detectSelectedShots(
-		view: CinemaCanvasView,
-		detector: Detector,
-	): Promise<void> {
+	private async detectSelectedShots(view: CinemaCanvasView): Promise<void> {
 		const selected = view.selectedItem();
 		if (!selected || selected.kind !== 'video') {
 			new Notice('Cinema canvas: select a clip first.');
 			return;
 		}
-		if (detector === 'transnet' && !(await this.shots.hasModel())) {
+		if (!(await this.shots.hasModel())) {
 			new Notice(
 				'Cinema canvas: download the TransNetV2 model in settings first.',
 				10000,
@@ -316,14 +425,16 @@ export default class CinemaCanvasPlugin extends Plugin {
 			return;
 		}
 
-		const label = DETECTOR_LABELS[detector];
 		new Notice(
-			`Cinema canvas: ${label} is finding cuts in ${selected.file.name}…`,
+			`Cinema canvas: ${DETECTOR_LABEL} is finding cuts in ${selected.file.name}…`,
 		);
-		const shots = await this.shots.detect(selected, detector, true);
+		const shots = await this.shots.detect(selected, true);
 		if (!shots) {
+			const reason = this.shots.errorFor(selected);
 			new Notice(
-				`Cinema canvas: ${label} found no cuts in ${selected.file.name}. Check the ffmpeg path in settings.`,
+				reason
+					? `Cinema canvas: ${DETECTOR_LABEL} failed on ${selected.file.name}. ${reason}`
+					: `Cinema canvas: ${DETECTOR_LABEL} found no cuts in ${selected.file.name} — it may be a single take.`,
 				8000,
 			);
 			return;
@@ -339,7 +450,7 @@ export default class CinemaCanvasPlugin extends Plugin {
 	 * Runs one clip at a time in the background: detection is a full decode,
 	 * so anything more would just contend for the same cores the UI needs.
 	 */
-	private async detectShots(detector: Detector): Promise<void> {
+	private async detectShots(): Promise<void> {
 		const version = await this.shots.probe();
 		if (!version) {
 			new Notice(
@@ -348,9 +459,9 @@ export default class CinemaCanvasPlugin extends Plugin {
 			);
 			return;
 		}
-		// Both detectors decode through ffmpeg; only TransNetV2 also needs the
-		// network on disk.
-		if (detector === 'transnet' && !(await this.shots.hasModel())) {
+		// TransNetV2 reads its frames through ffmpeg, and also needs the
+		// network itself on disk.
+		if (!(await this.shots.hasModel())) {
 			new Notice(
 				'Cinema canvas: download the TransNetV2 model in settings first.',
 				10000,
@@ -359,18 +470,17 @@ export default class CinemaCanvasPlugin extends Plugin {
 		}
 
 		const clips = [...this.index.allItems()].filter(
-			(item) => item.kind === 'video' && !this.shots.has(item, detector),
+			(item) => item.kind === 'video' && !this.shots.has(item),
 		);
 		if (clips.length === 0) {
 			new Notice('Cinema canvas: every clip already has shots.');
 			return;
 		}
 
-		const label = DETECTOR_LABELS[detector];
 		new Notice(
-			`Cinema canvas: ${label} is finding cuts in ${clips.length} clip(s)…`,
+			`Cinema canvas: ${DETECTOR_LABEL} is finding cuts in ${clips.length} clip(s)…`,
 		);
-		const detected = await this.shots.detectAll(clips, detector);
+		const detected = await this.shots.detectAll(clips);
 		new Notice(
 			`Cinema canvas: detected shots in ${detected} of ${clips.length} clip(s).`,
 		);

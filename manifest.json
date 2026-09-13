@@ -1,9 +1,9 @@
 {
 	"id": "cinema-canvas",
 	"name": "Cinema Canvas",
-	"version": "0.8.0",
+	"version": "0.10.0",
 	"minAppVersion": "1.7.2",
-	"description": "Lays vault stills and clips out as a zoomable canvas grid, with a shot strip that breaks the selected clip into its cuts, using ffmpeg or TransNetV2.",
+	"description": "Lays vault stills and clips out as a zoomable canvas grid, breaks clips into their cuts with TransNetV2, and maps a film’s soundtrack into dialogue, music, effects and silence.",
 	"author": "Khan",
 	"isDesktopOnly": true
 }

@@ -3,6 +3,7 @@ import { ThumbnailStore } from '../media/thumbnails';
 import { CinemaCanvasSettings } from '../settings';
 import { ItemBox, Shot } from '../types';
 import { LayoutMetrics } from './layout';
+import { SegmentPlayer } from './segment-player';
 
 /** Below this on-screen width a hover preview is not worth a decoder. */
 const HOVER_PREVIEW_MIN_WIDTH = 160;
@@ -43,6 +44,8 @@ export class MediaCell {
 	private readonly img: HTMLImageElement;
 	private stub: HTMLElement | null = null;
 	private video: HTMLVideoElement | null = null;
+	/** Confines inline playback to `activeShot`, to the frame. */
+	private segment: SegmentPlayer | null = null;
 	private progressFill: HTMLElement | null = null;
 	private mode: CellMode = 'still';
 	private cancelRequest: (() => void) | null = null;
@@ -210,9 +213,8 @@ export class MediaCell {
 			this.mode === 'preview' && this.video
 				? this.video
 				: this.createVideo();
-		// A preview video is already past its metadata, so seek it directly;
-		// a fresh one was parked at the shot head by `createVideo`.
-		if (video.readyState >= 1) video.currentTime = shot.start;
+		// `startPlaying` seeks into the shot's first frame, for a preview
+		// video and a fresh one alike.
 		this.startPlaying(video);
 		return this.mode === 'playing';
 	}
@@ -230,16 +232,16 @@ export class MediaCell {
 		// is exactly the swap back to the still the grid should do.
 		video.addEventListener('pause', () => this.stopPlayback());
 		video.addEventListener('ended', () => this.stopPlayback());
-		video.addEventListener('timeupdate', () => {
-			// A shot ends where the next one begins; pausing there is what
-			// swaps the cell back to its still.
-			const shot = this.activeShot;
-			if (shot && video.currentTime >= shot.end) {
-				video.pause();
-				return;
-			}
-			this.renderProgress(video);
+		// A shot ends where the next one begins. Pausing on its last frame is
+		// what swaps the cell back to its still — through the `pause` listener
+		// above — and it has to be judged per frame: `timeupdate` arrives up to
+		// a quarter of a second late, which is several frames of the next shot.
+		this.segment?.destroy();
+		this.segment = new SegmentPlayer(video, {
+			loop: () => false,
+			onFrame: () => this.renderProgress(video),
 		});
+		if (this.activeShot) this.segment.play(this.activeShot);
 
 		this.progressFill = this.frame
 			.createDiv({ cls: 'cine-item-progress' })
@@ -309,23 +311,12 @@ export class MediaCell {
 		video.preload = 'auto';
 		video.controls = false;
 		this.video = video;
-		this.seekToShotStart(video);
 		return video;
 	}
 
-	/** Parks a fresh `<video>` at the head of the active shot before it plays. */
-	private seekToShotStart(video: HTMLVideoElement): void {
-		const shot = this.activeShot;
-		if (!shot) return;
-		const seek = (): void => {
-			video.currentTime = shot.start;
-		};
-		// HAVE_METADATA is the first point at which a seek is honoured.
-		if (video.readyState >= 1) seek();
-		else video.addEventListener('loadedmetadata', seek, { once: true });
-	}
-
 	private teardownVideo(): void {
+		this.segment?.destroy();
+		this.segment = null;
 		const video = this.video;
 		if (!video) return;
 		this.video = null;

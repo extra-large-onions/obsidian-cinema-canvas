@@ -9,7 +9,7 @@ export interface Shot {
 	/** Seconds from the start of the file. */
 	start: number;
 	end: number;
-	/** scdet score at the cut that opened this shot; 0 for the first one. */
+	/** Cut confidence x100 at the cut that opened this shot; 0 for the first. */
 	score: number;
 }
 

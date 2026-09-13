@@ -1,6 +1,7 @@
 import { App, setIcon } from 'obsidian';
 import { MediaItem } from '../types';
 import { formatShotRange } from '../utils/timecode';
+import { SegmentPlayer } from './segment-player';
 
 export interface LightboxOptions {
 	loopVideos: boolean;
@@ -20,6 +21,8 @@ export class Lightbox {
 	private readonly counter: HTMLElement;
 	private items: MediaItem[] = [];
 	private index = 0;
+	/** Confines the shown shot's playback, to the frame. */
+	private segment: SegmentPlayer | null = null;
 	private open = false;
 
 	constructor(
@@ -155,6 +158,8 @@ export class Lightbox {
 	}
 
 	private clearStage(): void {
+		this.segment?.destroy();
+		this.segment = null;
 		const video = this.stage.querySelector('video');
 		if (video instanceof HTMLVideoElement) video.pause();
 		this.stage.empty();
@@ -180,17 +185,12 @@ export class Lightbox {
 				// Native controls still scrub the whole file, deliberately —
 				// seeing what surrounds a shot is the point of opening it big.
 				// Playback is what gets confined to the shot.
+				// Scrubbing out of the shot releases it.
 				video.loop = false;
-				const start = (): void => {
-					video.currentTime = shot.start;
-				};
-				if (video.readyState >= 1) start();
-				else video.addEventListener('loadedmetadata', start, { once: true });
-				video.addEventListener('timeupdate', () => {
-					if (video.currentTime < shot.end) return;
-					if (this.options.loopVideos) video.currentTime = shot.start;
-					else video.pause();
+				this.segment = new SegmentPlayer(video, {
+					loop: () => this.options.loopVideos,
 				});
+				this.segment.play(shot);
 			} else {
 				video.loop = this.options.loopVideos;
 			}

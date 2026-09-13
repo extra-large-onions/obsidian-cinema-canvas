@@ -7,38 +7,26 @@ import {
 	requestUrl,
 } from 'obsidian';
 import { MediaItem, Shot } from '../types';
-import {
-	MODEL_BYTES,
-	MODEL_URL,
-	detectWithTransNet,
-	lastLines,
-	releaseModels,
-} from './transnet';
+import { cyrb53 } from '../utils/hash';
+import { releaseModels } from './onnx';
+import { MODEL_BYTES, MODEL_URL, detectWithTransNet } from './transnet';
 
 /**
- * Which detector found a cut.
+ * What finds the cuts: TransNetV2, a network trained on labelled cuts.
  *
- * `ffmpeg` is the scdet filter: one decode pass, six seconds for six minutes of
- * video, and no idea what a shot is. `transnet` is TransNetV2, a network
- * trained on labelled cuts: fourteen times slower and much harder to fool.
- * Both are cached per clip, so switching between them is instant once each has
- * run once.
+ * There used to be a choice between this and ffmpeg's scdet filter. scdet is
+ * far faster, but it compares neighbouring frames and has no idea what a shot
+ * is, so a whip pan or a flash reads as a cut and a dissolve reads as three.
+ * The network is better by enough that the choice was not worth the interface
+ * it cost, so it is the only detector now.
  */
-export type Detector = 'ffmpeg' | 'transnet';
+export const DETECTOR_LABEL = 'TransNetV2';
 
-export const DETECTORS: readonly Detector[] = ['ffmpeg', 'transnet'];
-
-/** Short label for the strip and for notices. */
-export const DETECTOR_LABELS: Record<Detector, string> = {
-	ffmpeg: 'ffmpeg',
-	transnet: 'TransNetV2',
-};
-
-/** One frame a detector thought might be a cut, and how strongly. */
+/** One frame TransNetV2 thought might be a cut, and how strongly. */
 export interface Candidate {
 	/** Seconds from the start of the file. */
 	time: number;
-	/** 0-100. scdet's own score for ffmpeg; probability x100 for TransNetV2. */
+	/** 0-100: the network's cut probability x100. */
 	score: number;
 }
 
@@ -53,17 +41,31 @@ export interface Candidate {
 interface ShotCacheFile {
 	/** Vault path at the time of detection, for tracing a stray cache file. */
 	path: string;
-	/** Absent in files written before 0.7, which were all ffmpeg. */
-	detector?: Detector;
+	/**
+	 * What wrote this file.
+	 *
+	 * Only `'transnet'` is read. Files written by the old ffmpeg detector score
+	 * frames on a completely different scale — scdet's 1-20 against a
+	 * probability x100 — so reading one at a TransNetV2 threshold would
+	 * silently report a feature film as a single take.
+	 */
+	detector?: string;
 	duration: number;
 	/** Scores under this were never recorded, so a lower threshold would lie. */
 	floor: number;
 	candidates: Candidate[];
+	/**
+	 * `'incoming'`: every time names the first frame of the incoming shot.
+	 *
+	 * Absent from TransNetV2 files written before 0.8.1, whose times were one
+	 * frame early. Those are ignored rather than shifted: the shift is one frame
+	 * at the clip's exact frame rate, which the file never recorded.
+	 */
+	cutAt?: 'incoming';
 }
 
 /** Everything known about one clip, before a sensitivity is chosen. */
 interface Detection {
-	detector: Detector;
 	duration: number;
 	floor: number;
 	candidates: Candidate[];
@@ -71,14 +73,12 @@ interface Detection {
 
 interface Job {
 	item: MediaItem;
-	detector: Detector;
 	resolve: (shots: Shot[] | null) => void;
 }
 
 export interface ShotOptions {
+	/** Still needed: TransNetV2 reads its frames through an ffmpeg pipe. */
 	ffmpegPath: string;
-	/** scdet score a cut must reach, 1-20. */
-	threshold: number;
 	/** TransNetV2 probability x100 a cut must reach, 5-95. */
 	transnetThreshold: number;
 	minShotLength: number;
@@ -87,25 +87,12 @@ export interface ShotOptions {
 }
 
 /**
- * The lowest score a detector is asked to report, and so the lowest sensitivity
- * the cache can answer for. Measured on a 370 s 720p clip: 7.4% of frames score
- * at or above 1.0 under scdet, which is ~11 KB of cache and no measurable
- * decode cost over a high threshold. Anything below this is noise — the median
- * frame scores 0.07.
+ * The lowest score TransNetV2 is asked to report, and so the lowest confidence
+ * the cache can answer for. The network is decisive — on a 370 s clip only 102
+ * of 11090 frames scored over 0.1 — so recording everything at or above 1 costs
+ * a few kilobytes and makes every confidence above it free to try.
  */
 export const SCORE_FLOOR = 1;
-
-/**
- * `[scdet @ 0x…] lavfi.scd.score: 19.102, lavfi.scd.time: 2.1021`
- *
- * scdet logs one of these per detected cut at info level, so the whole shot
- * list arrives on stderr and nothing has to be demuxed to a file first.
- */
-const SCD_LINE = /lavfi\.scd\.score:\s*([\d.]+),\s*lavfi\.scd\.time:\s*([\d.]+)/g;
-const DURATION_LINE = /Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/;
-
-/** Detection is CPU-bound, so one clip at a time keeps the UI responsive. */
-const DETECT_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Vault-relative, under the plugin folder. Never inside the vault proper. */
 const MODEL_FILE = 'models/transnetv2.onnx';
@@ -120,17 +107,15 @@ const MODEL_FILE = 'models/transnetv2.onnx';
  */
 export class ShotIndex extends Component {
 	private readonly dir: string;
-	/** `path detector` -> raw detection, for the current mtime only. */
+	/** Vault path -> raw detection, for the current mtime only. */
 	private readonly detections = new Map<string, Detection>();
-	/** Shots derived at the current sensitivity; dropped when it changes. */
+	/** Shots derived at the current confidence; dropped when it changes. */
 	private readonly derived = new Map<string, Shot[]>();
-	/** Which detector's cuts the strip shows for a clip that has both. */
-	private readonly preferred = new Map<string, Detector>();
 	/** Cache file names seen on disk, listed once at startup. */
 	private readonly onDisk = new Set<string>();
-	/** Keys a detector could not read; retried only after a rescan. */
+	/** Clips that could not be read; retried only after a rescan. */
 	private readonly failed = new Set<string>();
-	/** `path detector` -> why the last attempt failed, for the strip to show. */
+	/** Vault path -> why the last attempt failed, for the strip to show. */
 	private readonly errors = new Map<string, string>();
 	private readonly queue: Job[] = [];
 	private readonly listeners = new Set<() => void>();
@@ -160,7 +145,6 @@ export class ShotIndex extends Component {
 
 	setOptions(options: ShotOptions): void {
 		const retuned =
-			options.threshold !== this.options.threshold ||
 			options.transnetThreshold !== this.options.transnetThreshold ||
 			options.minShotLength !== this.options.minShotLength;
 		this.options = options;
@@ -184,18 +168,10 @@ export class ShotIndex extends Component {
 		return this.queue.length + (this.running ? 1 : 0);
 	}
 
-	/** The detector running or queued for `item`, or null. */
-	pendingDetector(item: MediaItem): Detector | null {
-		if (this.running?.item.path === item.path) return this.running.detector;
-		return (
-			this.queue.find((job) => job.item.path === item.path)?.detector ??
-			null
-		);
-	}
-
 	/** True while `item` is queued for detection or being detected right now. */
 	isPending(item: MediaItem): boolean {
-		return this.pendingDetector(item) !== null;
+		if (this.running?.item.path === item.path) return true;
+		return this.queue.some((job) => job.item.path === item.path);
 	}
 
 	/** 0-1 through the detection of `item`, or null when it is not measurable. */
@@ -205,26 +181,19 @@ export class ShotIndex extends Component {
 	}
 
 	/**
-	 * Why the last run of `detector` on `item` failed, or null.
+	 * Why the last run on `item` failed, or null.
 	 *
-	 * A detector that ran fine and genuinely found nothing reports no error, so
+	 * A run that finished fine and genuinely found nothing reports no error, so
 	 * this separates "this clip is one long take" from "the runtime is not
 	 * installed" — which otherwise look identical from the strip.
 	 */
-	errorFor(item: MediaItem, detector?: Detector): string | null {
-		if (detector)
-			return this.errors.get(this.cacheKey(item.path, detector)) ?? null;
-		for (const d of DETECTORS) {
-			const message = this.errors.get(this.cacheKey(item.path, d));
-			if (message) return message;
-		}
-		return null;
+	errorFor(item: MediaItem): string | null {
+		return this.errors.get(item.path) ?? null;
 	}
 
-	/** True when `detector` ran on `item` and produced nothing usable. */
-	hasFailed(item: MediaItem, detector?: Detector): boolean {
-		if (detector) return this.failed.has(this.keyFor(item, detector));
-		return DETECTORS.some((d) => this.failed.has(this.keyFor(item, d)));
+	/** True when detection ran on `item` and produced nothing usable. */
+	hasFailed(item: MediaItem): boolean {
+		return this.failed.has(this.keyFor(item));
 	}
 
 	/** Loads every cached candidate list into memory. */
@@ -249,20 +218,16 @@ export class ShotIndex extends Component {
 						parsed.candidates.length === 0
 					)
 						continue;
-					const detector = parsed.detector ?? 'ffmpeg';
-					this.detections.set(this.cacheKey(parsed.path, detector), {
-						detector,
+					// Anything the old ffmpeg detector wrote is ignored: its
+					// scores are on another scale entirely. Those files are
+					// swept up by `prune` and `clear`.
+					if (parsed.detector !== 'transnet') continue;
+					if (parsed.cutAt !== 'incoming') continue;
+					this.detections.set(parsed.path, {
 						duration: parsed.duration,
 						floor: parsed.floor ?? SCORE_FLOOR,
 						candidates: parsed.candidates,
 					});
-					// TransNetV2 is the more trustworthy of the two, so when a
-					// clip has both it is what the strip opens on.
-					if (
-						detector === 'transnet' ||
-						!this.preferred.has(parsed.path)
-					)
-						this.preferred.set(parsed.path, detector);
 				} catch {
 					// Truncated or hand-edited: ignore it and let the clip be
 					// detected again on demand.
@@ -274,82 +239,45 @@ export class ShotIndex extends Component {
 	}
 
 	/**
-	 * Shots for `item` at the current sensitivity, or null when no detector has
-	 * ever run on it.
+	 * Shots for `item` at the current confidence, or null when detection has
+	 * never run on it.
 	 *
 	 * Cutting the candidates is cheap but the strip asks on every render, so
-	 * the result is memoised until the sensitivity changes.
+	 * the result is memoised until the confidence changes.
 	 */
-	get(item: MediaItem, detector?: Detector): Shot[] | null {
-		const which = detector ?? this.detectorFor(item);
-		if (!which) return null;
-		const key = this.cacheKey(item.path, which);
-		const cached = this.derived.get(key);
+	get(item: MediaItem): Shot[] | null {
+		const cached = this.derived.get(item.path);
 		if (cached) return cached;
-		const detection = this.detections.get(key);
+		const detection = this.detections.get(item.path);
 		if (!detection) return null;
 		const shots = buildShots(
 			detection.candidates,
 			detection.duration,
-			this.thresholdFor(which),
+			this.options.transnetThreshold,
 			this.options.minShotLength,
 		);
-		this.derived.set(key, shots);
+		this.derived.set(item.path, shots);
 		return shots;
 	}
 
-	/** Whose cuts `get` returns for this clip, or null when it has none. */
-	detectorFor(item: MediaItem): Detector | null {
-		const preferred = this.preferred.get(item.path);
-		if (
-			preferred &&
-			this.detections.has(this.cacheKey(item.path, preferred))
-		)
-			return preferred;
-		return (
-			DETECTORS.find((d) =>
-				this.detections.has(this.cacheKey(item.path, d)),
-			) ?? null
-		);
-	}
-
-	/** True once `detector` — or any detector — has run on this clip. */
-	has(item: MediaItem, detector?: Detector): boolean {
-		if (detector)
-			return this.detections.has(this.cacheKey(item.path, detector));
-		return this.detectorFor(item) !== null;
-	}
-
-	/** Switches which cached detector the strip shows, without running one. */
-	prefer(item: MediaItem, detector: Detector): boolean {
-		if (!this.has(item, detector)) return false;
-		this.preferred.set(item.path, detector);
-		this.emit();
-		return true;
+	/** True once detection has run on this clip. */
+	has(item: MediaItem): boolean {
+		return this.detections.has(item.path);
 	}
 
 	/**
-	 * Detects `item` with `detector` unless it is already cached. Resolves to
-	 * the shot list, or null when the tool is missing or the file cannot be
-	 * read.
+	 * Detects `item` unless it is already cached. Resolves to the shot list, or
+	 * null when the tool is missing or the file cannot be read.
 	 */
-	detect(
-		item: MediaItem,
-		detector: Detector = 'ffmpeg',
-		force = false,
-	): Promise<Shot[] | null> {
+	detect(item: MediaItem, force = false): Promise<Shot[] | null> {
 		if (item.kind !== 'video') return Promise.resolve(null);
 		if (!force) {
-			if (this.has(item, detector)) {
-				this.preferred.set(item.path, detector);
-				this.emit();
-				return Promise.resolve(this.get(item, detector));
-			}
-			if (this.failed.has(this.keyFor(item, detector)))
+			if (this.has(item)) return Promise.resolve(this.get(item));
+			if (this.failed.has(this.keyFor(item)))
 				return Promise.resolve(null);
 		}
 		return new Promise<Shot[] | null>((resolve) => {
-			this.queue.push({ item, detector, resolve });
+			this.queue.push({ item, resolve });
 			this.progressListener?.(this.pending);
 			this.emit();
 			void this.pump();
@@ -357,19 +285,16 @@ export class ShotIndex extends Component {
 	}
 
 	/** Detects every clip with no cached list yet; resolves to how many worked. */
-	async detectAll(
-		items: Iterable<MediaItem>,
-		detector: Detector = 'ffmpeg',
-	): Promise<number> {
+	async detectAll(items: Iterable<MediaItem>): Promise<number> {
 		const wanted: MediaItem[] = [];
 		for (const item of items) {
 			if (item.kind !== 'video') continue;
-			if (this.has(item, detector)) continue;
-			if (this.failed.has(this.keyFor(item, detector))) continue;
+			if (this.has(item)) continue;
+			if (this.failed.has(this.keyFor(item))) continue;
 			wanted.push(item);
 		}
 		const results = await Promise.all(
-			wanted.map((item) => this.detect(item, detector)),
+			wanted.map((item) => this.detect(item)),
 		);
 		return results.filter((shots) => shots !== null).length;
 	}
@@ -381,7 +306,6 @@ export class ShotIndex extends Component {
 		this.onDisk.clear();
 		this.detections.clear();
 		this.derived.clear();
-		this.preferred.clear();
 		this.failed.clear();
 		this.errors.clear();
 		this.queue.length = 0;
@@ -395,13 +319,16 @@ export class ShotIndex extends Component {
 		this.emit();
 	}
 
-	/** Removes cache files whose source is gone or has been re-exported. */
+	/**
+	 * Removes cache files whose source is gone or has been re-exported.
+	 *
+	 * Files left behind by the old ffmpeg detector are never in `live`, so this
+	 * is also what eventually sweeps them off disk.
+	 */
 	async prune(items: Iterable<MediaItem>): Promise<void> {
 		const live = new Set<string>();
 		for (const item of items)
-			if (item.kind === 'video')
-				for (const detector of DETECTORS)
-					live.add(this.keyFor(item, detector));
+			if (item.kind === 'video') live.add(this.keyFor(item));
 		const adapter = this.app.vault.adapter;
 		for (const name of [...this.onDisk]) {
 			if (live.has(name)) continue;
@@ -515,29 +442,19 @@ export class ShotIndex extends Component {
 		return this.options.ffmpegPath.trim() || 'ffmpeg';
 	}
 
-	private thresholdFor(detector: Detector): number {
-		return detector === 'transnet'
-			? this.options.transnetThreshold
-			: this.options.threshold;
-	}
-
-	private cacheKey(path: string, detector: Detector): string {
-		return `${path} ${detector}`;
-	}
-
 	private async pump(): Promise<void> {
 		if (this.running || this.disposed) return;
 		const job = this.queue.shift();
 		if (!job) return;
 		this.running = job;
-		this.runningProgress = job.detector === 'transnet' ? 0 : null;
+		this.runningProgress = 0;
 		// The strip watches this to swap its buttons for a progress readout.
 		this.emit();
 
-		const key = this.cacheKey(job.item.path, job.detector);
+		const key = job.item.path;
 		let detection: Detection | null = null;
 		try {
-			detection = await this.runDetection(job.item, job.detector);
+			detection = await this.runDetection(job.item);
 			this.errors.delete(key);
 		} catch (err) {
 			// A missing tool, an unreadable file, or a codec ffmpeg lacks. The
@@ -550,10 +467,9 @@ export class ShotIndex extends Component {
 		if (detection) {
 			this.detections.set(key, detection);
 			this.derived.delete(key);
-			this.preferred.set(job.item.path, job.detector);
-			shots = this.get(job.item, job.detector);
+			shots = this.get(job.item);
 		} else {
-			this.failed.add(this.keyFor(job.item, job.detector));
+			this.failed.add(this.keyFor(job.item));
 		}
 
 		this.running = null;
@@ -564,16 +480,10 @@ export class ShotIndex extends Component {
 		if (!this.disposed) void this.pump();
 	}
 
-	private async runDetection(
-		item: MediaItem,
-		detector: Detector,
-	): Promise<Detection | null> {
+	private async runDetection(item: MediaItem): Promise<Detection | null> {
 		const full = this.fullPathOf(item);
 		if (!full) return null;
-		const detection =
-			detector === 'transnet'
-				? await this.runTransNet(item, full)
-				: await this.runScdet(full);
+		const detection = await this.runTransNet(item, full);
 		if (!detection) return null;
 		await this.save(item, detection);
 		return detection;
@@ -611,63 +521,9 @@ export class ShotIndex extends Component {
 		});
 		if (result.candidates.length === 0) return null;
 		return {
-			detector: 'transnet',
 			duration: result.duration,
 			floor: SCORE_FLOOR,
 			candidates: result.candidates,
-		};
-	}
-
-	private async runScdet(full: string): Promise<Detection | null> {
-		// scdet is asked for everything above the floor, not above the user's
-		// sensitivity: the extra rows are what make retuning free. `-an -sn`
-		// skips the audio and subtitle decode, which roughly halves the wall
-		// time; `-f null -` means nothing is muxed or written.
-		const { stderr } = await run(
-			this.binary,
-			[
-				'-nostdin',
-				'-nostats',
-				'-i',
-				full,
-				'-vf',
-				`scdet=threshold=${SCORE_FLOOR}`,
-				'-an',
-				'-sn',
-				'-f',
-				'null',
-				'-',
-			],
-			DETECT_TIMEOUT_MS,
-		);
-
-		const duration = parseDuration(stderr);
-		if (!duration)
-			throw new Error(
-				`ffmpeg reported no duration for this file. ${lastLines(stderr)}`,
-			);
-
-		const candidates: Candidate[] = [];
-		SCD_LINE.lastIndex = 0;
-		let match: RegExpExecArray | null;
-		while ((match = SCD_LINE.exec(stderr)) !== null) {
-			const time = Number(match[2]);
-			if (!Number.isFinite(time) || time <= 0 || time >= duration)
-				continue;
-			// Two decimals is well past what the score is meaningful to, and
-			// keeps a feature-length cache in the tens of kilobytes.
-			candidates.push({
-				time: Math.round(time * 1000) / 1000,
-				score: Math.round((Number(match[1]) || 0) * 100) / 100,
-			});
-		}
-		if (candidates.length === 0) return null;
-
-		return {
-			detector: 'ffmpeg',
-			duration,
-			floor: SCORE_FLOOR,
-			candidates,
 		};
 	}
 
@@ -677,22 +533,25 @@ export class ShotIndex extends Component {
 		return adapter.getFullPath(item.file.path);
 	}
 
-	private keyFor(item: MediaItem, detector: Detector): string {
+	private keyFor(item: MediaItem): string {
 		const hash = cyrb53(item.path).toString(36);
 		const size = item.file.stat.size.toString(36);
-		// ffmpeg keeps the unsuffixed name it had before there was a choice.
-		const suffix = detector === 'ffmpeg' ? '' : `_${detector}`;
-		return `${hash}${size}_${item.version.toString(36)}${suffix}.json`;
+		// The `_transnet` suffix is kept even though there is nothing to tell
+		// it apart from any more: it is the name every existing cache file
+		// already has, and dropping it would both orphan them and collide with
+		// the unsuffixed names the old ffmpeg detector wrote.
+		return `${hash}${size}_${item.version.toString(36)}_transnet.json`;
 	}
 
 	private async save(item: MediaItem, detection: Detection): Promise<void> {
-		const key = this.keyFor(item, detection.detector);
+		const key = this.keyFor(item);
 		const payload: ShotCacheFile = {
 			path: item.path,
-			detector: detection.detector,
+			detector: 'transnet',
 			duration: detection.duration,
 			floor: detection.floor,
 			candidates: detection.candidates,
+			cutAt: 'incoming',
 		};
 		try {
 			await this.app.vault.adapter.write(
@@ -713,13 +572,13 @@ export class ShotIndex extends Component {
 /**
  * Cuts a clip into contiguous shots covering its whole duration.
  *
- * Pure, and the only place sensitivity is applied. `candidates` is every frame
- * the detector scored at or above the floor; `threshold` decides which of those
+ * Pure, and the only place confidence is applied. `candidates` is every frame
+ * the network scored at or above the floor; `threshold` decides which of those
  * are cuts, so raising it re-cuts the clip without touching the file.
  *
  * A cut closer than `minLength` to the previous **kept** one is dropped rather
- * than merged afterwards, because scdet fires two or three times across a
- * single dissolve and each of those would otherwise become its own shot.
+ * than merged afterwards, because a single dissolve can score across several
+ * neighbouring frames and each of those would otherwise become its own shot.
  */
 export function buildShots(
 	candidates: Candidate[],
@@ -755,17 +614,6 @@ export function buildShots(
 		start = end;
 	}
 	return shots;
-}
-
-/** `Duration: 00:06:10.04, start: 0.000000, bitrate: 998 kb/s` */
-function parseDuration(stderr: string): number {
-	const m = DURATION_LINE.exec(stderr);
-	if (!m) return 0;
-	const hours = Number(m[1]);
-	const minutes = Number(m[2]);
-	const seconds = Number(m[3]);
-	if (![hours, minutes, seconds].every((n) => Number.isFinite(n))) return 0;
-	return hours * 3600 + minutes * 60 + seconds;
 }
 
 function run(
@@ -815,22 +663,4 @@ function messageOf(err: unknown): string {
 	if (err instanceof Error) return err.message;
 	const text = String(err).trim();
 	return text || 'Unknown error.';
-}
-
-/** cyrb53 — fast, well-distributed 53-bit string hash. */
-function cyrb53(str: string, seed = 0): number {
-	let h1 = 0xdeadbeef ^ seed;
-	let h2 = 0x41c6ce57 ^ seed;
-	for (let i = 0; i < str.length; i++) {
-		const ch = str.charCodeAt(i);
-		h1 = Math.imul(h1 ^ ch, 2654435761);
-		h2 = Math.imul(h2 ^ ch, 1597334677);
-	}
-	h1 =
-		Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
-		Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-	h2 =
-		Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
-		Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-	return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }

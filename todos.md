@@ -721,3 +721,305 @@ change.
   getting used as a scrubber.
 - Dragging a slider re-renders every card. Fine at 90 segments, unmeasured at
   400 — the same open question the strip has.
+
+## v8.1 — segments ran past their cut
+
+Reported: the cuts look right, but playing a segment does not stop before the
+cut — it stops a beat after, "like 0.1s". Two separate causes, both measured.
+
+### 1. The stop was checked on `timeupdate`
+
+Every player — clip view, lightbox, canvas cell — confined a shot with
+`timeupdate` and `currentTime >= shot.end`. Chromium fires `timeupdate` about
+every 250 ms, so playback ran 0–250 ms into the next shot before the check even
+happened. Modelled on the reference clip's 82 scdet segments: 4.1 frames of the
+next shot on average, 8 at worst (267 ms). The report's "0.1s" is the typical
+case.
+
+Fixed with `SegmentPlayer` (`src/view/segment-player.ts`), used by all three:
+
+- `requestVideoFrameCallback` fires once per *presented* frame with that frame's
+  own media time. The callback arrives after presentation, so it stops on the
+  frame whose time is within 1.5 frames of `end` — the segment's last frame —
+  rather than waiting for `>= end`, which is already the next shot.
+- Play-once pauses there and then **pins** the last frame with a seek to just
+  inside it, so if the decoder got one frame further before the pause landed,
+  the outgoing shot is what stays on screen and `currentTime` is still inside
+  the segment (the highlight stays put).
+- Seeks aim a little inside the frame (`min(half a frame, 1/120 s)`). Cut times
+  are stored to the millisecond, and a seek a hair before a frame shows the one
+  before it — the last frame of the previous shot, as a flash.
+- Frame duration is learned from the callback (shortest media-time step per
+  presented frame), 1/30 until two frames have been seen.
+- Ending, or scrubbing out of the segment, releases the confinement, so pressing
+  play afterwards carries on into the next shot.
+
+Verified with a frame-stepped simulation of the shipped class against a mock
+video, over the 82 real segments: first frame shown is the segment's first,
+nothing from the next shot is shown, and play-once comes to rest on the last
+frame — at 29.97, 23.976, 25 and 59.94 fps, with ±4 ms of timing jitter, play
+once and loop. A pessimistic model where one frame escapes after `pause()` shows
+exactly one frame of the next shot and then pins back; whether Chromium ever
+does that from inside a frame callback is not something the simulation can say.
+
+### 2. TransNetV2 put every cut one frame early
+
+Of the 62 cuts both detectors found on the reference clip, 60 sat exactly one
+frame before scdet's. scdet's score for frame n compares it with frame n−1, so
+its time is the first frame of the incoming shot. TransNetV2 marks the last frame
+of the outgoing shot — consistent with its authors' scene splitter, which puts
+the marked frame at the end of the earlier scene. The windowing was checked and
+is not the cause (pad index 25 is frame 0; the second window's kept range starts
+at frame 50).
+
+Fixed in `peaks()`: a candidate's time is `(i + 1) / fps`. Re-run on the
+reference clip: 305 candidates, 79 s, and **62 of 62** shared cuts now on exactly
+the same frame as scdet.
+
+Cache files now carry `cutAt: 'incoming'`. TransNetV2 files without it are
+ignored on load rather than shifted — the shift is one frame at the clip's exact
+rate, which the file never recorded — so those clips need TransNetV2 run again.
+ffmpeg caches are unaffected.
+
+## v9 — the sound view
+
+Asked for: cuts stay for clips; for a full film, "the sound/silence/dialogue
+whatever", in a separate view, in its own cache file.
+
+### What was built
+
+- `SoundIndex` (`src/media/sound.ts`): queue of one, progress, stop, errors, a
+  cache per file in `sound/` keyed by path hash + size + mtime (a rewritten file
+  is re-analysed and its old file deleted), and a streamed model download with
+  redirects, progress and SHA-256 verification against pinned revisions.
+- `analyseSound` (`src/media/sound-analysis.ts`): one ffmpeg decode of the first
+  audio track to 16 kHz mono f32le, read three ways — Silero VAD per 32 ms, PANNs
+  CNN14 on a 2 s window every 1 s (every second heard by two windows and
+  averaged), RMS per 100 ms. Cached as integers.
+- `classifySound`: pure, thresholds -> four lanes with per-lane gap filling and
+  minimum runs. Effects = audible and neither dialogue nor music, or an effect
+  class at 20+ underneath them.
+- `CinemaSoundView`: player, whole-film lanes (pre-rendered, playhead drawn per
+  frame), detail lanes following the playhead with wheel zoom, hover readout
+  with PANNs' top three classes, and lists of music cues / silences / 30 s
+  without dialogue. Opens from the file menu, a command, the strip and the clip
+  view.
+- `src/media/onnx.ts`: the runtime loader and session cache moved out of
+  `transnet.ts`, now shared; sessions can turn off thread spinning.
+
+### Choosing the models
+
+- AST (MIT's Audio Spectrogram Transformer, quantised ONNX from Xenova) scores
+  best on AudioSet, but measured 1.1-2.2 s per 10 s window on the CPU: 18+ min
+  for a two-hour film at 10 s resolution. Rejected.
+- PANNs CNN14 at 16 kHz takes raw waveform of any length (the STFT is in the
+  graph): 42 ms per 2 s window alone, ~74 ms inside the pipeline. DirectML was
+  slower at every window size under 60 s.
+- The only ONNX export found is a single uploader's Hugging Face repo (MIT, no
+  model card). Accepted because its op set is plain (no custom ops, so nothing
+  executable beyond the graph), its output on the test track is exactly what a
+  working AudioSet tagger gives, and the download is pinned by revision and
+  hash. If that repo disappears, the download fails loudly; nothing breaks
+  silently.
+
+### Verified
+
+- Known-truth test track (185 s: TTS speech, silence, Satie on piano, rain and
+  thunder, gunshots, thunder, TTS over Beethoven at -12 dB, silence, Beethoven):
+  175/185 seconds exact. Speech 25/30 (the 5 are TTS sentence pauses, digitally
+  silent), silence 20/20, music 60/60, effects 43/45, speech+music 27/30.
+- 14.0 s wall for 185 s (9.1 min per two hours); spinning off took it from 16.7 s.
+- Stop mid-run, a file with no audio track, a 1.35 s file, a 7.55 s file.
+- Real download through `SoundIndex`: 330 MB in 40 s, progress to 100%, no
+  `.part` left; a truncated model re-fetched on its own; a different file served
+  under the same name (Silero v5.1.2) refused with nothing installed.
+- Lifecycle: analyse -> cache file -> fresh index reads it back; rewritten file
+  -> old readings ignored -> re-analysis replaces the old cache file; stop
+  records no error and writes nothing.
+- The view, in jsdom over the real index and models: 37 checks through no
+  models -> ready (estimate from duration) -> running (stop button and header
+  survive progress updates) -> done (summary shares, 3 music cues and 2
+  silences on the test track, sliders, lists) -> drawing at dpr 2 with no NaN
+  rects, 0.83 ms per frame -> hover readout, overview click seeks, wheel zoom,
+  arrow keys, space, cue row plays -> slider survives a drag and re-labels ->
+  missing file and back -> reopened tab reads the cache without running.
+
+### Not done / not verified
+
+- Not run inside Obsidian: real layout, theme colours, and whether Electron's
+  renderer tolerates a 9-minute analysis without stutter. Every inference call
+  is async (the runtime works off the main thread), so it should, but that is
+  inference, not measurement.
+- Not run on a real film. The test track is synthetic by necessity; a mix with
+  music under most dialogue will lean on the music slider.
+- Renaming a file re-analyses it (the cache is keyed by path), and the old cache
+  file stays until **Clear sound analysis**.
+- Only the first audio track. No track picker.
+- One analysis at a time, in-process, like TransNetV2.
+
+## v10 — one detector, and the strip as two tabs
+
+Asked for: the bottom sticky should carry buttons that open the dedicated cut
+and sound views, plus a tab bar switching between a quick cut view and a quick
+sound view, with an analyse button on whichever side has not been run. And:
+remove the ffmpeg cut detector, "the neural net is just so much better".
+
+### The ffmpeg detector is gone
+
+Not reduced to a one-member union — the concept is deleted. `Detector`,
+`DETECTORS`, `DETECTOR_LABELS`, `detectorFor`, `prefer`, `pendingDetector`, the
+`preferred` map, the per-detector cache key, `runScdet`, `SCD_LINE`,
+`parseDuration` and the `shotThreshold` setting are all removed; `ShotIndex`
+methods no longer take a detector. `probe()` and `ffmpegPath` stay, because
+TransNetV2 reads its frames through an ffmpeg pipe and the sound view reads its
+audio the same way.
+
+Two things were deliberately kept:
+
+- The `_transnet` suffix on cache file names. It is what every existing cache
+  file is already called, so dropping it would orphan them all *and* collide
+  with the unsuffixed names the ffmpeg detector used to write.
+- The `detector` field inside the cache file, now read as a filter: `init()`
+  skips anything that does not say `'transnet'`. This is the one genuinely
+  dangerous part of the change — scdet scores frames 1-20 and the network
+  scores probability x100, so an old file read at the 50% confidence would
+  report a feature film as a single take rather than failing loudly. Old files
+  are ignored on load and swept up by `prune` and `clear`.
+
+Consequence to expect: a clip that was only ever cut with ffmpeg now shows as
+uncut until TransNetV2 is run on it.
+
+### The strip
+
+`ShotStrip` is now two tabs over one body, both about the selected clip.
+
+- **Cuts**: the shot cards as before, the cutting sliders, Find cuts when it has
+  not run, refresh when it has.
+- **Sound**: the same four lanes as the sound view, drawn `STRIP_ROWS` high
+  across the whole clip, with a hover readout and click-to-play-from-here. When
+  it has not been analysed the lanes are replaced by a panel that walks the same
+  path the sound view does — download models, analyse, progress with a stop
+  button, error with a retry.
+- Each tab carries a dot when its own side has never been run for this clip, so
+  "there is nothing here" is visible before you switch to find out.
+- Both tabs carry the button that opens their dedicated view.
+
+`src/view/sound-lanes.ts` is new: `LANES`, `drawLanes`, `rowTops`, the theme
+colour cache and the two formatters moved out of `sound-view.ts` so the strip
+and the full view draw from one implementation. Two drawings of the same four
+lanes would have drifted.
+
+Clicking the strip's lanes plays the canvas cell from that point to the end,
+through a synthetic full-tail `Shot` — `SegmentPlayer` already confines
+playback to a range and pauses at its end, so this needed no new plumbing.
+
+### Verified
+
+- jsdom, over the real `ShotIndex` and `SoundIndex` and the real models
+  (`domtest/strip-test.cjs`): a planted ffmpeg-era cache file is ignored while
+  the TransNetV2 one loads, and no scdet-scored cut leaks into the shot list;
+  both tabs, the not-run dots, the open-dedicated-view buttons, card clicks,
+  analyse -> progress -> lanes, the hover readout, click-to-seek carrying the
+  right time and duration, the two sliders re-labelling with nothing re-run,
+  and switching tabs and clips back and forth.
+- `npm run build` clean; `npm run lint` 0 errors.
+
+### Not done / not verified
+
+- Still never run inside Obsidian. Everything below is inference from jsdom.
+- The strip's sound tab offers only the dialogue and music thresholds. The
+  silence level belongs with the lists, which only the full view has.
+- Analysing a two-hour film from the strip works but is an odd place to start a
+  nine-minute job; the dedicated view is the better home for that.
+- Old ffmpeg cache files are only deleted when `prune` or **Clear detected
+  shots** runs, not on upgrade.
+
+## v10.1 — the sound view's lanes were blank, and full screen
+
+Two things, one of which was the actual complaint.
+
+### The blank lanes
+
+In real Obsidian the dedicated sound view drew nothing: labels, stats and lists
+all present, both canvases and the readout empty. The strip drew the same four
+lanes from the same module perfectly, which is what made it worth diffing the
+two draw paths rather than the lane drawing.
+
+The cause, from the console trace Khan sent:
+
+```
+HierarchyRequestError: Failed to execute 'appendChild' on 'Node':
+Only one element on document allowed.
+    at HTMLDocument.createEl (enhance.js)
+    at lt.draw (plugin:cinema-canvas)
+```
+
+`draw()` builds the overview as an offscreen bitmap, and asked for it with
+`activeDocument.createEl('canvas')`. **Obsidian's `createEl` appends to whatever
+it is called on**, so on a document it tries to add a second document element and
+throws. Every `draw()` died on that line, before the detail lanes and before the
+readout — which is why the labels, stats and lists were all present and only the
+painting was missing.
+
+The bitmap is now made by the timeline element, which `createEl` may legally
+append to, and removed again on the next line: a detached canvas is still a
+valid `drawImage` source and never reaches the layout. `createElement` would say
+it more directly, but `obsidianmd/prefer-create-el` forbids it and
+`eslint-comments/no-restricted-disable` forbids silencing that rule, so this is
+the shape that satisfies both.
+
+I had first reasoned my way to the `isShown()` gate at the top of `draw()` from
+the screenshot alone, which was wrong — right symptom, wrong line. That work was
+kept, because all of it is real hardening for a draw that runs once at open:
+
+- the canvases are sized inside `draw()`, the way the strip does it, rather than
+  in a pass of their own,
+- the `isShown()` gate is gone; a canvas still 0 px wide re-tries next frame,
+  bounded at 60 frames so a collapsed sidebar cannot hold a frame open,
+- `onResize`, `active-leaf-change` and `onLayoutReady` all draw again.
+
+The jsdom stub is why no test caught this: its `document.createEl` returned a
+detached element instead of appending. It now appends exactly as Obsidian's
+does, and jsdom throws the same `HierarchyRequestError`.
+
+### Full screen
+
+The sound view also gained an **expand** button and `f`. It fullscreens the
+view's own root, not the `<video>`: a fullscreened video element is handed to
+the compositor and sits above the rest of the page, so lanes drawn under it
+cannot be seen at all. The stylesheet hides the header and the lists under
+`.cine-sound-view:fullscreen`, so the DOM is untouched and the normal layout
+cannot regress.
+
+### Verified
+
+- `domtest/view-test.cjs`, 51 checks, all passing. The new ones: a canvas
+  reporting a width of 0 paints nothing and throws nothing; when the width
+  arrives the lanes paint and the readout fills, both via `onResize` and via the
+  retry alone with no resize at all; and a view detached at its first render —
+  which is how a leaf revealed after `onOpen` reads to `isShown` — still paints.
+- The harness was also run against a bundle built from a copy of `src` patched
+  back to the shipped code (`old-src`, `VIEW_BUNDLE=`), and with the corrected
+  stub it **reproduces Khan's crash exactly** — `HierarchyRequestError: Invalid
+  insertion of CANVAS node in #document node`, jsdom's wording for the same
+  thing. So the harness now fails on the real bug rather than agreeing with
+  whatever the current code happens to do.
+- An empty readout is the symptom that identifies a dead `draw()`: it is written
+  on the last line of the method, so it is missing whenever the method did not
+  finish. "The canvases are sized" is the check that does *not* detect it —
+  `render` sized them before `draw` ever ran.
+- Full screen: the button is in the header, the *view* is what goes full screen
+  rather than the video, the lanes stay in the tree and repaint on the
+  transition, and both the button and `f` toggle back out.
+- `npm run build` clean; `npm run lint` 0 errors.
+
+### Not done / not verified
+
+- The blank-lane fix matches the reported stack trace and is reproduced in the
+  harness, but the lanes have still not been seen painting inside Obsidian.
+- Nothing else in the plugin calls `createEl` on a document — checked — but the
+  same trap is open to any future offscreen canvas.
+- The fullscreen *layout* is still a guess — how much room the player takes up
+  there, whether the detail lanes want to be taller.
+- The clip view's expand button still fullscreens only the player, so its
+  ribbon disappears the way the lanes would have.
