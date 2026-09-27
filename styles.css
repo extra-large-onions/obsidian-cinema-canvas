@@ -725,6 +725,38 @@
 }
 
 /*
+ * The one big button the view is offering — Find cuts, Analyse sound, Stop.
+ * It is set apart from the icons by a rule and given the accent, because it is
+ * the only thing to press on a file nothing has been run on yet, and because
+ * full screen keeps the header: this is how the run starts from across the
+ * room.
+ */
+.cine-clip-cta {
+	display: flex;
+	align-items: center;
+	margin-left: 4px;
+	padding-left: 12px;
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.cine-clip-cta button {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+}
+
+.cine-clip-cta-icon {
+	display: flex;
+	align-items: center;
+}
+
+.cine-clip-cta-icon .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+/*
  * The player takes the room the segments do not. Capping it at half the tab
  * keeps at least two rows of segments visible, which is what makes the view
  * worth opening over the lightbox.
@@ -757,7 +789,7 @@
 	flex: 0 0 auto;
 	display: flex;
 	align-items: stretch;
-	gap: 1px;
+	gap: 0;
 	height: 20px;
 	padding: 0;
 	background: var(--background-modifier-border);
@@ -766,9 +798,18 @@
 	cursor: pointer;
 }
 
+/*
+ * Blocks touch, and each draws its own left edge. Spacing them with a gap
+ * broke on a film: two thousand one-pixel gaps are wider than the ribbon, so
+ * the end of the film was pushed out of view and the playhead drifted.
+ */
 .cine-clip-block {
-	min-width: 1px;
+	position: relative;
+	flex: 0 0 auto;
+	min-width: 0;
+	box-sizing: border-box;
 	background: var(--background-secondary);
+	box-shadow: inset 1px 0 var(--background-modifier-border);
 	transition: background-color 80ms ease;
 }
 
@@ -896,7 +937,7 @@
 
 /*
  * ---------------------------------------------------------------------------
- * The sound view. Built on the clip view's frame — header, stage, body — with
+ * The sound half. Built on the clip view's frame — header, stage, body — with
  * the ribbon swapped for lanes: the whole film above, the playhead's minute
  * below.
  * ---------------------------------------------------------------------------
@@ -1254,28 +1295,738 @@
 }
 
 /*
- * Full screen: the player and the lanes, nothing else.
- *
- * The header and the lists are the two things you cannot read from across the
- * room; the lanes are the one thing worth having bigger. The player's own full
- * screen button hands the picture to the compositor, where nothing can be drawn
- * over it -- this one takes the whole view instead, so the sound stays visible.
+ * The sound half lives in the film's own tab, under the same header and the
+ * same player. Its two rows are made empty by the view and filled by the pane
+ * the first time the switch is thrown, so they carry no styling of their own.
  */
-.cine-sound-view:fullscreen {
-	background: var(--background-primary);
-}
-
-.cine-sound-view:fullscreen .cine-clip-header,
-.cine-sound-view:fullscreen .cine-sound-body {
+.cine-sound-slot:empty {
 	display: none;
 }
 
-.cine-sound-view:fullscreen .cine-sound-stage {
+/*
+ * ---------------------------------------------------------------------------
+ * Scenes and labels: sets of cuts chosen by hand, and a line of text on a cut.
+ * Both are saved in a note beside the film.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * The band under the ribbon: the cards, with the scene list beside them.
+ *
+ * The list is only as tall as the grid. The player and the ribbon keep the
+ * whole width of the tab, and none of their height goes to it.
+ */
+.cine-clip-below {
+	flex: 1 1 54%;
+	display: flex;
+	min-height: 0;
+}
+
+.cine-clip-below .cine-clip-body {
 	flex: 1 1 auto;
+	min-width: 0;
+}
+
+/* A labelled cut: a dot at the top of its block. */
+.cine-clip-block.has-label::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 50%;
+	width: 4px;
+	height: 4px;
+	margin-left: -2px;
+	border-radius: 50%;
+	background: var(--text-accent);
+	pointer-events: none;
+}
+
+/*
+ * A highlighted scene among all the cuts: its cuts keep their look and the
+ * rest fade, so the scene reads as a pattern across the film.
+ */
+.cine-clip-ribbon.has-highlight .cine-clip-block:not(.is-in-scene) {
+	background: var(--background-primary);
+}
+
+.cine-clip-ribbon.has-highlight .cine-clip-block.is-in-scene:not(.is-active) {
+	background: var(--text-accent);
+}
+
+.cine-clip-body.has-highlight .cine-clip-card:not(.is-in-scene):not(.is-selected) {
+	opacity: 0.32;
+}
+
+.cine-clip-body.has-highlight .cine-clip-card:not(.is-in-scene):hover {
+	opacity: 0.8;
+}
+
+.cine-clip-body.has-highlight .cine-clip-card.is-in-scene .cine-clip-frame {
+	border-color: var(--text-accent);
+}
+
+/* Selected cards: an outline inside the frame, clear of the active border. */
+.cine-clip-card.is-selected .cine-clip-frame::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	box-shadow: inset 0 0 0 3px var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+	pointer-events: none;
+}
+
+.cine-clip-card.is-selected .cine-clip-number {
+	background: var(--interactive-accent);
+}
+
+/* The scenes a cut is in, as one coloured bar each, bottom left. */
+.cine-clip-chips {
+	position: absolute;
+	left: 4px;
+	bottom: 5px;
+	display: flex;
+	gap: 3px;
+}
+
+.cine-clip-chip {
+	width: 12px;
+	height: 5px;
+	border-radius: 3px;
+	background: var(--cine-scene-color, var(--text-accent));
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+/* In a scene's own tab: take this cut out of the scene. */
+.cine-clip-remove {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	display: none;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	align-items: center;
+	justify-content: center;
+	color: var(--text-on-accent);
+	background: rgba(0, 0, 0, 0.62);
+	border-radius: var(--radius-s);
+	box-shadow: none;
+}
+
+.cine-clip-remove svg {
+	width: 14px;
+	height: 14px;
+}
+
+.cine-clip-card:hover .cine-clip-remove {
+	display: flex;
+}
+
+.cine-clip-remove:hover {
+	background: var(--background-modifier-error);
+}
+
+.cine-clip-card[draggable='true'] {
+	-webkit-user-drag: element;
+}
+
+/* "Its cuts" / "All cuts" in a scene's tab. */
+.cine-mode-switch {
+	display: flex;
+	padding: 2px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-border);
+}
+
+.cine-mode-switch button {
+	height: auto;
+	padding: 2px 10px;
+	color: var(--text-muted);
+	background: transparent;
+	box-shadow: none;
+	font-size: var(--font-smaller);
+}
+
+.cine-mode-switch button.is-active {
+	color: var(--text-normal);
+	background: var(--background-primary);
+	box-shadow: var(--input-shadow);
+}
+
+/* The scene panel. */
+.cine-scene-panel {
+	flex: 0 0 240px;
+	max-width: 42%;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	border-left: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.cine-scene-panel-head {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.cine-scene-panel-title {
+	font-weight: var(--font-semibold);
+}
+
+.cine-scene-panel-count {
+	color: var(--text-faint);
+	font-size: var(--font-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-scene-new {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin-left: auto;
+	padding: 2px 8px;
+	font-size: var(--font-smaller);
+}
+
+.cine-scene-new-icon {
+	display: flex;
+}
+
+.cine-scene-new-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.cine-scene-panel-hint {
+	padding: 12px 10px;
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+	text-wrap: pretty;
+}
+
+.cine-scene-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 4px;
+}
+
+.cine-scene-row {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 6px 6px 8px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	user-select: none;
+}
+
+.cine-scene-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.cine-scene-row.is-highlighted,
+.cine-scene-row.is-current {
+	background: var(--background-primary);
+	border-color: var(--background-modifier-border);
+}
+
+.cine-scene-row.is-current .cine-scene-row-title {
+	color: var(--text-accent);
+}
+
+.cine-scene-swatch {
+	flex: 0 0 auto;
+	width: 10px;
+	height: 10px;
+	border-radius: 3px;
+	background: var(--cine-scene-color, var(--text-accent));
+}
+
+/* No Cut is the whole film, not a colour: its swatch is an outline. */
+.cine-scene-row.is-none .cine-scene-swatch {
+	background: transparent;
+	box-shadow: inset 0 0 0 1.5px var(--text-faint);
+}
+
+.cine-scene-row.is-none .cine-scene-row-title {
+	color: var(--text-muted);
+}
+
+.cine-scene-row.is-none.is-current .cine-scene-row-title {
+	color: var(--text-normal);
+}
+
+.cine-scene-row-text {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.cine-scene-row-title {
+	overflow: hidden;
+	color: var(--text-normal);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.cine-scene-row-title.is-unnamed {
+	color: var(--text-muted);
+}
+
+.cine-scene-row-meta {
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.cine-scene-row-tools {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 0;
+	opacity: 0;
+	transition: opacity 80ms ease;
+}
+
+.cine-scene-row:hover .cine-scene-row-tools,
+.cine-scene-row.is-highlighted .cine-scene-row-tools,
+.cine-scene-row.is-current .cine-scene-row-tools {
+	opacity: 1;
+}
+
+/* While cuts are held over a scene, or over New scene. */
+.cine-scene-row.is-drop-target,
+.cine-scene-new.is-drop-target {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+}
+
+.cine-clip-body.is-drop-target {
+	outline: 2px dashed var(--interactive-accent);
+	outline-offset: -6px;
+}
+
+/* While a drag is on, every scene shows it can take the cuts. */
+.cine-clip-view.is-dragging-cuts .cine-scene-row,
+.cine-clip-view.is-dragging-cuts .cine-scene-new {
+	border-style: dashed;
+	border-color: var(--background-modifier-border-hover);
+}
+
+/*
+ * Full screen keeps every control, on both halves — the timeline, the cards,
+ * the scenes and the switch. The player simply takes the room the window
+ * gained. Handing the picture alone to the Fullscreen API, which is what the
+ * player's own button does, puts it on top of everything in the compositor and
+ * erases the rest.
+ */
+.cine-clip-view:fullscreen {
+	background: var(--background-primary);
+}
+
+.cine-clip-view:fullscreen .cine-clip-stage {
 	background: #000;
 }
 
-.cine-sound-view:fullscreen .cine-sound-timeline {
-	padding-bottom: 10px;
-	border-bottom: none;
+/* On the sound half the lanes are what the extra room is for. */
+.cine-clip-view:fullscreen .cine-sound-stage {
+	flex: 1 1 auto;
+}
+
+/* A narrow tab keeps the grid usable: the list goes under it. */
+@container (max-width: 640px) {
+	.cine-clip-below {
+		flex-direction: column;
+	}
+
+	.cine-scene-panel {
+		flex: 0 0 auto;
+		max-width: none;
+		max-height: 34%;
+		border-top: 1px solid var(--background-modifier-border);
+		border-left: none;
+	}
+}
+
+
+/* The list moves under the grid in a narrow tab; see the container query above. */
+.cine-clip-view {
+	container-type: inline-size;
+}
+.cine-clip-label {
+	padding: 2px 2px 0;
+	overflow: hidden;
+	color: var(--text-accent);
+	font-size: var(--font-smallest);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.cine-prompt-hint {
+	margin-top: 0;
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+}
+
+.cine-prompt-input {
+	width: 100%;
+}
+
+/* The scene note's block, in reading view. */
+.cine-scene-block {
+	padding: 10px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+}
+
+.cine-scene-block-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: var(--font-semibold);
+}
+
+.cine-scene-block-count {
+	color: var(--text-faint);
+	font-size: var(--font-smaller);
+	font-weight: normal;
+}
+
+.cine-scene-block-open {
+	margin-left: auto;
+}
+
+.cine-scene-block-list {
+	margin: 8px 0 0;
+	padding: 0;
+	list-style: none;
+}
+
+.cine-scene-block-list li {
+	display: flex;
+	gap: 10px;
+	padding: 3px 4px;
+	border-radius: var(--radius-s);
+}
+
+.cine-scene-block-list li.is-link {
+	cursor: pointer;
+}
+
+.cine-scene-block-list li.is-link:hover {
+	background: var(--background-modifier-hover);
+}
+
+.cine-scene-block-time {
+	min-width: 5.6em;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-scene-block-error {
+	margin-top: 6px;
+	color: var(--text-error);
+	font-size: var(--font-smaller);
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The scenes half: every scene of the film filed under tags. The tag list on
+ * the left is shared by every film; the board on the right has one group per
+ * tag, and a scene with two tags is in two groups.
+ * ---------------------------------------------------------------------------
+ */
+.cine-board {
+	flex: 1 1 54%;
+	display: flex;
+	min-height: 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.cine-board-tags {
+	flex: 0 0 220px;
+	max-width: 42%;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	border-right: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.cine-board-tag-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 4px;
+}
+
+.cine-board-tag {
+	padding-top: 4px;
+	padding-bottom: 4px;
+}
+
+.cine-board-tag .cine-scene-panel-count {
+	margin-left: auto;
+}
+
+.cine-board-tag.is-empty .cine-scene-row-title {
+	color: var(--text-muted);
+}
+
+/* A tag the film's note uses that is not on the shared list. */
+.cine-board-tag.is-off-list .cine-scene-row-title {
+	font-style: italic;
+}
+
+.cine-board-tag-icon {
+	flex: 0 0 auto;
+	display: flex;
+	color: var(--text-faint);
+}
+
+.cine-board-tag-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.cine-board-tag.is-current .cine-board-tag-icon {
+	color: var(--text-accent);
+}
+
+.cine-board-tag-add {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.cine-board-tag-add-icon {
+	display: flex;
+	color: var(--text-faint);
+}
+
+.cine-board-tag-add-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.cine-board-tag-add input {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: var(--font-smaller);
+}
+
+.cine-board-groups {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow-y: auto;
+	padding: 8px 12px 16px;
+}
+
+.cine-board-group {
+	margin-bottom: 14px;
+	padding: 4px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-m);
+}
+
+.cine-board-group-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 2px 6px;
+}
+
+.cine-board-group-title {
+	font-weight: var(--font-semibold);
+}
+
+.cine-board-group.is-none .cine-board-group-title {
+	color: var(--text-muted);
+}
+
+.cine-board-off-list {
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	font-style: italic;
+}
+
+/* An empty tag is a place to drop scenes, and costs one line. */
+.cine-board-group.is-empty {
+	margin-bottom: 4px;
+}
+
+.cine-board-group.is-empty .cine-board-group-head {
+	padding-bottom: 0;
+}
+
+.cine-board-group.is-empty .cine-board-group-title {
+	color: var(--text-muted);
+	font-weight: var(--font-normal);
+}
+
+.cine-board-empty {
+	display: none;
+	padding: 10px;
+	border: 1px dashed var(--background-modifier-border-hover);
+	border-radius: var(--radius-s);
+	color: var(--text-faint);
+	font-size: var(--font-smaller);
+}
+
+.cine-board.is-dragging-scene .cine-board-empty {
+	display: block;
+}
+
+.cine-board-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+	gap: 10px;
+}
+
+.cine-board-card {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-top: 3px solid var(--cine-scene-color, var(--text-accent));
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	cursor: pointer;
+	user-select: none;
+}
+
+.cine-board-card:hover {
+	border-color: var(--background-modifier-border-hover);
+	border-top-color: var(--cine-scene-color, var(--text-accent));
+}
+
+.cine-board-still {
+	position: relative;
+	aspect-ratio: 16 / 9;
+	background: var(--background-secondary-alt);
+}
+
+.cine-board-card-tools {
+	position: absolute;
+	right: 4px;
+	bottom: 4px;
+	display: flex;
+	gap: 2px;
+	opacity: 0;
+	transition: opacity 80ms ease;
+}
+
+.cine-board-card:hover .cine-board-card-tools {
+	opacity: 1;
+}
+
+.cine-board-card-tools .cine-strip-icon {
+	background: color-mix(in srgb, var(--background-primary) 85%, transparent);
+}
+
+.cine-board-card-text {
+	padding: 6px 8px 2px;
+}
+
+.cine-board-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 4px 8px 8px;
+}
+
+.cine-board-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	height: 20px;
+	padding: 0 2px 0 8px;
+	border-radius: 10px;
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	white-space: nowrap;
+}
+
+.cine-board-chip-x,
+.cine-board-chip.is-add {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 8px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+
+.cine-board-chip.is-add {
+	width: 20px;
+	height: 20px;
+	border-radius: 10px;
+	background: transparent;
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border);
+}
+
+.cine-board-chip-x:hover,
+.cine-board-chip.is-add:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.cine-board-chip-x svg,
+.cine-board-chip.is-add svg {
+	width: 12px;
+	height: 12px;
+}
+
+/* While a scene or a tag is held over something that will take it. */
+.cine-board-group.is-drop-target,
+.cine-board-tag.is-drop-target,
+.cine-board-card.is-drop-target {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+.cine-board.is-dragging-scene .cine-board-tag:not(.is-none) {
+	border-style: dashed;
+	border-color: var(--background-modifier-border-hover);
+}
+
+/* Tags under a scene's title in the cuts half's list. */
+.cine-scene-row-tags {
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+@container (max-width: 640px) {
+	.cine-board {
+		flex-direction: column;
+	}
+
+	.cine-board-tags {
+		flex: 0 0 auto;
+		max-width: none;
+		max-height: 34%;
+		border-right: none;
+		border-bottom: 1px solid var(--background-modifier-border);
+	}
 }

@@ -1023,3 +1023,519 @@ cannot regress.
   there, whether the detail lanes want to be taller.
 - The clip view's expand button still fullscreens only the player, so its
   ribbon disappears the way the lanes would have.
+
+## v11 — whole films, scenes and labels, and everything in the vault
+
+Asked for: cut a whole movie; label cuts; group cuts together, each group in a
+view of its own. Then, on where it lives: "note in the vault. also move the
+shots/ and sound to vault as well". Groups are scenes — consecutive runs of cuts
+— and each opens in its own tab.
+
+### Decisions (locked)
+
+- **Everything is in the vault, in two kinds of place.** Rebuildable caches go to
+  `_cache/cinema-canvas/{shots,sound}/`, the folder this vault already gitignores
+  as "rebuildable cache — never version this" and where writer-studio keeps its
+  index. Hand-made data goes in a note beside the film: `Heat.mkv` ->
+  `Heat.mkv.scenes.md`. Thumbnails and models stay in the plugin folder; they
+  were not part of the ask.
+- **The note holds one fenced `cinema-scenes` JSON block, not frontmatter.**
+  Lists of objects render badly in Properties, and frontmatter would mean
+  trusting a stub of `parseYaml` in every test. The block is parsed by our own
+  code and written by replacing only the block; the rest of the note is the
+  user's.
+- **Scenes and labels are anchored to times, never cut numbers.** The confidence
+  slider renumbers cuts. A scene is `{start, title}`, runs to the next scene, and
+  snaps to the nearest cut whenever it is read; a label is `{at, text}` shown on
+  whichever cut contains `at`. Both survive any retune.
+- **Strict parsing, and refuse to write.** One unreadable entry makes the whole
+  block an error, and nothing is saved while there is one. A lenient parser that
+  skipped bad entries would delete them on the next save.
+- **The note's name keeps the film's extension**, so two films sharing a base
+  name never share a note, and the film is found from the note by stripping the
+  suffix — nothing inside the block can go stale on a rename.
+- **One view, two modes.** A scene tab is `cinema-clip` with `scene: <mark>` in
+  its state rather than a second view type: the same player, ribbon and grid,
+  confined to the scene.
+- **The cut view opens any video**, not only what the canvas indexes — a film is
+  usually outside the canvas folders — and follows the file through vault events.
+
+### Tasks
+
+- [x] `media/scenes.ts` — pure model (`buildScenes`, `findScene`, `sceneOf`,
+      `nearestShot`, `labelsIn`, `splitAt`, `mergeIntoPrevious`, `renameScene`,
+      `setLabel`), the block (`parseNotes`, `parseBlock`, `formatBlock`,
+      `writeNotes`), and `notePathFor` / `filmPathForNote`
+- [x] `media/scene-store.ts` — reads lazily; writes through `vault.process`
+      against what is on disk; creates the note on the first edit; re-reads a
+      hand edit; moves the note with its film via `fileManager.renameFile`
+- [x] `media/vault-cache.ts` — `_cache/cinema-canvas/`, `ensureDir`, and
+      `migrateDir`, which moves the old plugin-folder caches once (a file already
+      at the destination wins; the old folder goes when empty)
+- [x] `shots.ts` — cache in the vault; `cancel`, `wasCancelled`, `startedAt`; a
+      second `detect` joins the queued run; `rename` carries a detection to its
+      new path; `clear` resolves queued callers instead of leaving them waiting
+- [x] `transnet.ts` — `signal` kills ffmpeg and throws `DetectionCancelled`;
+      `DETECTION_SECONDS_PER_SECOND` for the estimate
+- [x] `sound.ts` — cache in the vault; `rename`
+- [x] `view/clip-view.ts` — rewritten: any video; scene bands; ribbon blocks that
+      touch (a film's 1px gaps were wider than the ribbon); a section per scene
+      with play / rename / merge / open; the cut menu; `T` and `S`; scene tab
+      mode; stop button, percent and time left; stills only near the viewport,
+      withdrawn when scrolled away; cards held back while a slider is dragged;
+      the highlight touches two elements per cut change, not every card
+- [x] `view/scene-block.ts`, `view/text-prompt.ts`
+- [x] `main.ts` — `SceneStore`; **Open in cut view** in the file menu and as a
+      command; `openClip(file, scene?)`; `isVideoFile`, `itemForFile`; renames
+      carry shot lists and sound readings; the code block processor
+- [x] Strip: stop button while detecting; no "found no cuts" notice after a stop
+- [x] Bump to 0.11.0
+
+### Verified
+
+Four suites over the real sources bundled with esbuild:
+
+- **Scene model**, 34 checks: snapping, hidden marks, scenes following a re-cut,
+  full coverage, edits leaving their argument alone, the block round trip, text
+  around the block byte-identical, `$&` in a title, CRLF endings, and six kinds
+  of malformed block each reported rather than silently dropped.
+- **Scene store** over a real folder, 18 checks: no note creates nothing; the
+  first edit creates one; hand text either side survives; two concurrent edits
+  both land; a broken block is reported, keeps the last good scenes, refuses the
+  edit and leaves the file byte-identical; a film rename moves its note; an
+  unrelated rename is ignored.
+- **Cut view** in jsdom at film scale, 55 checks. The reference clip's real
+  candidates repeated twenty times: 7400.8 s, **1281 cuts**, rendered in 218 ms.
+  Block widths sum to 100.0000%. No still requested on render; twelve for twelve
+  cards in view; none asked twice; all twelve withdrawn on scrolling away. Split,
+  label, edit and clear a label, name the implicit first scene, merge; a broken
+  note refusing an edit with a notice; a scene tab (981 cuts, stepping wraps
+  inside the scene, state round trip); a merged scene's open tab falling back to
+  the scene it joined; a slider drag re-cutting the ribbon live (1281 -> 781)
+  while the cards wait for the release; a running detection's percent, time left
+  and stop button; a film rename keeping its cuts and its note.
+- **ShotIndex against real ffmpeg and TransNetV2**, 25 checks, on the real 370 s
+  and 177 s clips: shots and sound migrated out of the plugin folder; a file at
+  the destination winning; rename carrying a detection, read back by a fresh
+  index; a second request joining the run; a queued run cancelled at once; the
+  running one **stopped in 7 ms, ffmpeg gone**, nothing cached, nothing failed;
+  Find cuts starting it again; and a full run still working — 29 cuts in 33.9 s,
+  cached under `_cache/cinema-canvas/shots`, covering all 177.41 s.
+- `npm run build` clean; `npm run lint` 0 errors and the same 16 warnings.
+
+tsc, not the harness, caught the worst bug: `SceneStore.load(path)` shadowed
+`Component.load()`. `addChild` calls `load()` to run `onload`, so real Obsidian
+would have skipped the store's vault listeners, while the shim's `Component` has
+no `load` and every suite would have passed. The harness's own bug went the
+other way: its fake `rmdir(path, false)` used `fs.rmSync`, which refuses any
+folder, so the first run reported a migration failure the plugin did not have.
+
+### Not done / not verified
+
+- **Not run inside Obsidian.** The menu, the modal, the code block processor,
+  the sticky scene headers and `leaf.updateHeader` (undocumented; called only if
+  present) are only as right as the shim's idea of them.
+- **No real two-hour film has been cut.** The scale test uses real detections
+  repeated, and the 27-minute estimate is the measured rate extrapolated.
+- **Inference still stutters the renderer** in bursts — for a film, half an hour
+  of it. Running it out of process is still the fix, as it has been since v7.
+- A file renamed while Obsidian is closed is not seen, so its caches stay under
+  the old path. That is already the case for `cinema/4f6aef…-hd.mp4`, whose shot
+  list was written as `cinema/the boys/…`: it will show as uncut.
+- Two marks that snap to one cut hide the later one until the cuts change back,
+  and nothing shows that it is there.
+- The ribbon still re-renders per slider step: fine at 1281 blocks in jsdom,
+  unmeasured in Obsidian.
+- The strip shows neither scenes nor labels; only the cut view does.
+
+## v11.1 — a scene is any set of cuts
+
+v11 made a scene a run of consecutive cuts that divides the film. That was
+wrong: "not consecutive, you see. it can be whatever combination of cut i want.
+also scenes can overlap." Also asked for: a panel with the scenes, an add scene
+button, dragging cuts into a scene, and two previews — only the chosen cuts, and
+all the cuts with the chosen ones highlighted.
+
+The v11 note format never reached a vault (no `.scenes.md` existed anywhere), so
+it was replaced outright, with no migration.
+
+### Decisions (locked)
+
+- **A scene is `{id, title, cuts}`.** `cuts` holds one time inside each chosen
+  cut: its **middle**, not its start. A start is the boundary itself, and a
+  re-detection that moves it by a millisecond would put the time in the cut
+  before. Each time shows whichever cut contains it now; two times that land in
+  one cut after a retune show the cut once and are both kept.
+- **Identity is a random six-character id**, not the title (which can repeat,
+  change or be empty) and not a count (two devices would pick the same one).
+  Tabs store it; the block rejects duplicates.
+- **Order is the note's order** for scenes and film order for cuts inside one.
+  Reordering by hand was not asked for.
+- **Selection works like a file list.** A click plays and selects one card,
+  `Ctrl`/`Cmd`-click toggles, `Shift`-click runs from the last click, and a right
+  click outside the selection selects that card alone. An action with no
+  selection applies to the cut under the playhead.
+- **Dragging goes through a module variable, not `dataTransfer`.** The browser
+  hides a drag's data until drop, so a row could not light up while cuts are
+  held over it. Times rather than indexes, so a drop into another tab resolves
+  them against that tab's cut list.
+- **Two previews in one scene tab**: *Its cuts* (the ribbon lays them end to
+  end) and *All cuts* (the rest fade). In the film's tab, clicking a panel row
+  gives the second preview without opening anything.
+- **Deleting doesn't ask first; the notice offers Undo**, which puts the
+  scene back where it was.
+- **Cards are kept across edits** and updated in place (labels, scene chips,
+  highlight, selection). Rebuilding 1281 cards on every drop would lose the
+  scroll position and ask for every still again.
+
+### Tasks
+
+- [x] `media/scenes.ts` — the new model: `shotAt`, `anchorOf`, `buildScenes`,
+      `findScene`, `scenesWith`, `hasMember`, `scenesByShot`, `labelsByShot`,
+      `playRanges` (adjacent cuts joined, so a scene plays through them without
+      a pause), `newSceneId`; edits `addScene`, `addCuts`, `removeCuts`,
+      `renameScene`, `deleteScene`, `restoreScene`; strict parsing of the new
+      block
+- [x] `view/clip-view.ts` — scene panel; selection; drag and drop between cards,
+      rows, New scene and another tab; *Its cuts* / *All cuts*; scene playback
+      in sequence; cut menu and `N` `A` `Delete` `V` `P` `Esc`; bands and scene
+      sections removed
+- [x] `view/scene-picker.ts` — `FuzzySuggestModal` for "Add to a scene…"
+- [x] `view/scene-block.ts` — lists scenes with their cut counts, opening by id
+- [x] `main.ts` — `openClip(file, sceneId?)`
+- [x] `styles.css` — panel, rows, drop targets, selection, highlight fade, chips,
+      the mode switch; the panel goes under the grid in a narrow tab
+- [x] README
+
+### Verified
+
+- **Scene model**, 42 checks: non-consecutive and overlapping scenes; scenes
+  following a re-cut; times past the end hidden; `hasMember` against `includes`
+  over every index; `labelsByShot` identical to `labelsIn` for every cut,
+  including a label 0.4 ms before a boundary; adjacent cuts joined for playback;
+  an add of a cut already present (by another time inside it) returning the same
+  object; remove dropping every time inside the cut; undo restoring position;
+  round trip; ten kinds of malformed block, including duplicate and missing ids.
+- **Scene store**, 19 checks, on the new format.
+- **Cut view** in jsdom, 1281 cuts, 119 checks:
+  - Selection: click, Ctrl, Cmd, Shift from the anchor, Esc.
+  - A scene of three scattered cuts made with `N`, stored by their middles and
+    highlighted at once.
+  - A Shift-selection dragged onto New scene; an overlap giving one card two
+    chips.
+  - An unselected card dragged onto a row without disturbing the selection; a
+    duplicate drop adding nothing.
+  - The menu listing "Remove from" for both scenes; the picker adding two cuts;
+    `A` and New scene….
+  - Labels edited with the card element unchanged.
+  - Highlight moving between rows; rename; delete and Undo byte-for-byte.
+  - A broken note refusing a drop.
+  - The scene tab: only its cuts, and the playhead placed along the joined
+    ribbon and hidden outside it. Scene playback jumps the gap and stops at the
+    end. Stepping wraps; state is stored by id.
+  - A card dragged from the film's tab into the scene tab, and the scene tab
+    refusing its own cards; the × and `Delete`.
+  - *All cuts* with `A`, and `V` back; a panel row switching the tab to another
+    scene; a deleted scene's tab.
+  - A slider re-cut clearing the selection while scenes keep their cuts; hiding
+    the panel remembered in state; a film rename carrying the note.
+- `npm run build` clean; `npm run lint` 0 errors, the same 16 warnings.
+- The TransNetV2 / ShotIndex suite was not re-run: nothing it covers changed.
+
+### Not done / not verified
+
+- **Still not run inside Obsidian.** Native drag and drop in Electron, the
+  fuzzy picker, `Notice` with a fragment, `createFragment`, the container query
+  and `requestSaveLayout` are only as right as the shim's idea of them. Drag
+  events in the tests are synthetic, with a fake `dataTransfer`.
+- Scene colours follow a scene's position in the note, so deleting one shifts
+  the colours of those after it.
+- No reordering of scenes, and no custom order of cuts inside a scene.
+- A scene whose cuts all fall past the end of a re-detected film shows 0 cuts
+  and doesn't say why.
+
+## v11.2 — one view per film, and the scenes beside the cards
+
+v11.1 spent a tab on every scene and a full-height column on the scene panel.
+Both were wrong: "i don't want the side bar for scenes like that. i don't want a
+separate tab for each scene. when i fullscreen, show all the existing controls -
+timeline, clip, scene. the sidebar for scene, it doesn't take up vertical space -
+it's within the controls below, not the whole right side. there's also the
+default of No Cut."
+
+### Decisions (locked)
+
+- **One film is one tab.** A scene is something the view *shows*, not something
+  it opens. `openClip(file, scene)` reveals the film's existing tab and tells it
+  which scene to show; the tab keeps the film's name and the film icon.
+- **No Cut is the first row of the list**: the whole film, nothing picked. It is
+  where the view starts, what `Esc` and the film button go back to, and what
+  clicking the shown scene's row again returns to. Its swatch is an outline, not
+  a colour.
+- **The list stands in the band under the ribbon**, beside the grid
+  (`.cine-clip-below`), so the player and the ribbon keep the whole width and
+  lose none of their height to it. Under 640px it drops below the cards.
+- **Full screen takes the view's root**, not the picture, so the ribbon, the
+  cards and the scenes are all still there — the same trick the sound view
+  already used, minus its hiding of the header and lists.
+- **The picked scene is the highlight.** `focusId` is gone: `mode: 'all'` means
+  the scene's cuts stand out among all of them, `mode: 'only'` means only its
+  cuts are shown. A scene just made is shown in *All cuts*, which is where
+  seeing what went into it is worth something.
+- **A scene deleted under a view falls back to No Cut** rather than to a
+  placeholder explaining that its tab has lost its subject.
+
+### Tasks
+
+- [x] `view/clip-view.ts` — the layout band, the No Cut row, `selectScene`,
+      the row tools without "open in a tab", "Show X" in the cut menu,
+      full screen over the root, `Esc` back to the film
+- [x] `main.ts` — `openClip` reuses the film's tab and sets its scene
+- [x] `styles.css` — `.cine-clip-below`, the No Cut swatch, the panel width,
+      the `:fullscreen` rules, the container query
+- [x] README and the keys table
+
+### Verified
+
+- **Cut view**, 126 checks (was 119), including: the top-level layout is
+  header / stage / ribbon / below, with the list and the grid inside the last;
+  No Cut present and picked from the start, naming the film's cut count; a new
+  scene picked in this view with nothing opened in a tab; two `Esc` presses
+  going selection → whole film; a row clicked twice going back to No Cut; the
+  cut menu offering *Show* rather than *Open*; a scene deleted in another view
+  dropping this one back to No Cut; `F` handing the *view root* to the
+  Fullscreen API, not the stage.
+- **Scene model** 42 and **scene store** 19 unchanged: the note format did not
+  change in this round.
+- `npm run build` clean; lint 0 errors, the same 16 warnings.
+- Re-render of 1281 cuts with nothing changed: 45 ms in jsdom.
+
+### Not done / not verified
+
+- Still not run inside Obsidian: the reveal-and-retarget path in `openClip`,
+  the `:fullscreen` rules, and native drag and drop.
+- Picking a scene keeps whichever mode the switch was left on, so the first
+  click after a fresh open shows *Its cuts*. Only a scene just made forces
+  *All cuts*.
+- Scene colours still follow position in the note; deleting one shifts the rest.
+- No reordering of scenes, and no custom order of cuts inside one.
+
+## v11.3 — one tab for the cuts and the sound, and a header that repeats nothing
+
+> "i need you to merge audio view and cut scene into 1 tab, just have a switch.
+> the scene rename and back to whole movie control is redundant, remove, and the
+> play at the top as well. each scene has its own play already (add the same
+> controls to No Cut). now the analyze button that is shown in cinema canvas, add
+> it to the fullscreen view as well, separate and more highlighted."
+
+### Decisions
+
+- **One file is one tab.** The cuts and the sound are two questions about the
+  same file at the same moment, so they are two halves of one tab sharing one
+  player and one playhead, with a switch in the header. `CinemaSoundView` is
+  deleted; `VIEW_TYPE_CINEMA_SOUND` is no longer registered.
+- **The sound half is a pane, not a view.** `sound-view.ts` became
+  `sound-pane.ts`: it owns the lanes, the lists and the run, and is given two
+  rows the tab makes for it in the tab's own order. It never owns the player,
+  the header or the summary.
+- **The pane is built lazily**, the first time the switch is thrown, and kept
+  after that. A film whose sound is never asked about costs nothing.
+- **An audio file has no cuts half**, so it has no switch: `openSound` on an
+  mp3 lands on the sound half of a tab that only has one.
+- **The header repeats nothing a row does.** Play, rename and back-to-the-film
+  are gone from it; the scene row already carries the first two, and No Cut the
+  third. No Cut now carries the same play button every scene row has, and it
+  plays the whole film.
+- **The one big button is set apart and accented.** `.cine-clip-cta` sits behind
+  a rule at the end of the header: Find cuts on an uncut film, Download models
+  or Analyse sound on the sound half, Stop while either runs. It is in the
+  header rather than only in the panel because full screen keeps the header and
+  the panel is the first thing a bigger player pushes off the screen.
+- **Full screen is now one rule for both halves.** The old
+  `.cine-sound-view:fullscreen` block hid the header and the lists; that view no
+  longer exists, and `:not(.cine-sound-view)` is gone from the clip view's rule.
+
+### Tasks
+
+- `src/view/sound-pane.ts` new, `src/view/sound-view.ts` deleted.
+- `clip-view.ts`: `half` in the state, the switch, the CTA, the sound half's
+  render, No Cut's play, the sound branch of `onKeyDown`, `onResize`, the
+  `is-audio` stage, `css-change` and `fullscreenchange`.
+- `main.ts`: `openClip` and `openSound` share one `reveal`, which retargets the
+  file's existing tab instead of opening another.
+- `styles.css`: `.cine-clip-cta`, `.cine-sound-slot:empty`, one full-screen rule.
+
+### Verified
+
+- **Cut view**, 142 checks (was 126), including: both halves in the header with
+  a dot on the one never run; the sound half taking the tab while the *same*
+  `<video>` is kept — one player, not two; the lanes row filled in place; the
+  accented button standing on its own; the header keeping the switch and full
+  screen on the sound half; the cards and the ribbon as they were on the way
+  back; No Cut carrying a play button that runs the film from its first cut
+  without picking a scene; and the header no longer carrying play, pencil or
+  film while a scene is shown.
+- **Scene model** 42 and **scene store** 19 unchanged.
+- `npm run build` clean; lint 0 errors, the same 16 warnings.
+- Re-render of 1281 cuts with nothing changed: 47 ms in jsdom.
+
+### Not done / not verified
+
+- Still not run inside Obsidian. The lanes in particular are only proved inert
+  in jsdom: nothing is analysed there, so `drawLanes` never runs. The stub can
+  lie — a real film has to be switched to and drawn.
+- A saved layout holding a `cinema-sound` leaf now opens on nothing, because the
+  type is no longer registered. 0.11.0 never shipped, so no migration was
+  written.
+- The pane measures its canvases when the half is first shown; `setHalf` calls
+  `onResize` for that. Whether one frame is enough in Electron is untested.
+- `itemForFile` still reports `kind: 'video'` for an mp3. Nothing on the sound
+  half reads it, but it is wrong.
+
+### Nothing plays where you are not looking
+
+> "when i click elsewhere in cinema canvas, or when i switch tab, pause the
+> current video if playing."
+
+Two rules, in three views:
+
+- **The canvas.** `onClick` stops the playing cell unless the click landed on
+  that same cell — the background, a folder header, and another cell all stop
+  it, a still image as readily as a clip. Clicking the playing cell still
+  toggles, which is how you pause it by hand. Before this, only clicking
+  *another clip* stopped the first one.
+- **Leaving the tab.** Every view listens for `active-leaf-change` and acts
+  when the leaf named is not its own. The film's tab pauses its player and
+  keeps the frame (`pauseForNow`), so coming back and pressing space carries
+  on. The canvas stops its cell, which swaps the still back, and pauses the
+  lightbox without closing it (`Lightbox.pauseForNow`).
+
+Why pause rather than tear down: a two-hour file holds a decoder and a
+soundtrack, and the playhead, the cut under it and the scene shown are all
+worth keeping. Only the canvas cell is stopped outright, because a cell that
+is not playing *is* its still.
+
+**Verified:** cut view 142 checks (was 137), the five new ones covering a film
+playing, an event naming this same tab leaving it alone, leaving the tab
+pausing it, the frame kept, and coming back not starting it again. The test's
+workspace stub now keeps its handlers so the event can be fired at all; before
+this it threw every one away. Build clean, lint 0 errors / 16 warnings.
+
+**Not verified:** the canvas has no jsdom suite, so its click rule and its
+leaf-change handler are read but not run. `active-leaf-change` also fires when
+a sidebar leaf takes focus, so clicking the file explorer pauses the film as
+well as switching tab does — wanted here, but it is a wider rule than "switch
+tab".
+
+### One command to clear, not three
+
+> "my commands, merge all the clear into 1"
+
+**Clear thumbnail cache**, **Clear sound analysis** and **Clear detected shots**
+became one entry: **Clear cached data**. It opens a picker
+(`src/view/cache-picker.ts`) offering **Everything** first, then the three
+caches. The palette went from eight commands to six.
+
+The choice is kept rather than folded into one blunt command, because the three
+cost wildly different amounts to make again, and each line in the picker says
+which:
+
+- Thumbnails — made again as you look at them.
+- Detected shots — about 27 minutes per two-hour film.
+- Sound analysis — about 5 seconds per minute of audio.
+
+Losing a film's cut list because you wanted to rebuild its stills is the
+failure this avoids. **Everything** runs the three in order rather than at once:
+three cache folders rewritten in parallel is the one way to make it slower than
+it has to be. A failure is reported in the notice instead of being swallowed.
+
+**Verified:** build clean, lint 0 errors / 16 warnings. Cut view 142, scene
+model 42, scene store 19 — all unchanged, as expected: `main.ts` is type-only
+in the test bundle, so no suite reaches the palette. No reference to the three
+old ids or titles is left in `src/` or the README.
+
+**Not verified / cost:** not run in Obsidian, and nothing tests the palette at
+all. The three old command ids are gone, so **any hotkey bound to one of them
+is dropped** and has to be set again on the new command.
+
+### Cut and re-cut from the cut view
+
+> "add the button to cut/recut to the cut view in the main clip tab"
+
+The cuts half now carries one button that runs the network, in the same slot
+the sound half puts **Analyse sound**: last in the header, behind a rule, in the
+accent colour, with an icon.
+
+| The film | The button | What it does |
+| --- | --- | --- |
+| uncut | **Find cuts · TransNetV2** | `renderFindCuts`, as before, moved into the CTA slot |
+| cut | **Re-cut** | `detect(item, true)` — the network again, from the frames |
+| running | **Stop** | `shots.cancel(item)` |
+
+Two icons went, because the button replaced them rather than joining them: the
+`square` stop and the `refresh-cw` re-detect. The re-detect was also hidden
+whenever a scene was shown, which was the wrong rule — a scene is anchored to a
+time in the film, not to a cut number, so it survives the film being cut again.
+**Re-cut** is therefore offered whether or not a scene is on screen.
+
+The tooltip says both halves of the price: about 27 minutes for two hours, and
+that scenes and labels are kept. It also points at the sliders, which change how
+the film is cut without running anything at all.
+
+`renderCta` grew an optional icon (`sparkles`, `square`) and a `data-cta`
+attribute naming the button, which is what the tests read.
+
+**Verified:** cut view 146 checks (was 142). The four new ones: a cut film
+offers **Re-cut**, accented and alone; it replaced the refresh icon rather than
+joining it; it is still offered while a scene is shown; and **Stop** is the
+accented button during a run, with no `square` icon left in the header. The
+uncut check now also proves **Find cuts** sits inside the CTA slot. Build clean,
+lint 0 errors / 16 warnings.
+
+**Not verified / open:** not run in Obsidian. **Re-cut** starts at once, with no
+confirmation — the same as the old icon did, but it is a much easier button to
+hit now. The sound half is left asymmetric: re-analysing is still a small
+`refresh-cw` icon, not a **Re-analyse** button beside **Re-cut**.
+
+## v11.4 — tags, and a scenes half to file scenes by them
+
+> "add me tags for each scene, also a separate scene view. let me organize by
+> tags - this scene is over the counter, that scene is action with a lot of
+> rapid cuts, those scenes are shot and counter shot, 2 shot, ensemble, ...
+> make a list of tags that is add/removable - all within the same view."
+
+### Decisions
+
+- **A third position on the switch, not a tab.** "Separate scene view" but "all
+  within the same view": Cuts | Scenes | Sound, one player. `ViewHalf` gained
+  `'scenes'`; the leaf state records `half: 'scenes'`.
+- **A scene has any number of tags.** Stored as `tags: string[]` on the scene in
+  the film's note, written only when non-empty so older notes are unchanged by
+  their next edit. Case-insensitive: "Two shot" and "two shot" are one tag.
+- **One tag list for every film**, in settings (`sceneTags`), because shot
+  grammar is not particular to a film. Seeded with ten common ones. Tags a
+  film's note uses that are not on the list are shown too, in italics.
+- **Organised = grouped.** One group per tag, Untagged first; a scene with two
+  tags is in two groups. Drag scene → tag and tag → scene both *add*; the chip
+  × removes. Nothing moves a scene out of a group by dragging.
+- **Removing a tag from the list** strips it from this film's scenes (undo in
+  the notice) and does not rewrite other films' notes.
+- "Over the counter" read as over the shoulder; seeded as **Over the shoulder**.
+
+### Verified
+
+- Tag model, 16 checks in `scratchpad/tags.test.ts`: old notes parse with no
+  tags and write back without a `tags` key; add/remove, case-insensitive no-ops,
+  blank tags ignored; round trip through the note; `removeTagEverywhere` leaves
+  untouched scenes identical; hand-edited duplicates and blanks cleaned; a
+  non-text tag refused with an error rather than dropped.
+- `npm run build` clean; lint 0 errors, the same 16 warnings.
+
+### Not done / not verified
+
+- **No DOM run at all.** The jsdom harness from the v11 sessions is gone from
+  the scratchpad, so the board, the drag and drop, the + menu and the switch
+  are type-checked only. Not run in Obsidian either.
+- No renaming or reordering of tags in the view (removal's undo puts a tag
+  back in its old place, which is the only reordering there is).
+- The settings tab does not show the tag list; it is edited only in the view.

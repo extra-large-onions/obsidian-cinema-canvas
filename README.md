@@ -4,8 +4,10 @@ An Obsidian plugin that scans the vault for stills and short clips and lays them
 out on a zoomable canvas — **one group per folder** — for reviewing
 cinematography practice footage.
 
-Nothing is written to the vault. The canvas is generated from the live file
-index, not from a stored `.canvas` document, so it is always current.
+The canvas is generated from the live file index, not from a stored `.canvas`
+document, so it is always current. What the plugin does write into the vault is
+kept to two places: rebuildable caches under `_cache/cinema-canvas/`, and one
+note beside each film you give scenes or labels to.
 
 ## Opening it
 
@@ -70,7 +72,8 @@ So the grid draws proxies instead.
 First open of a cold vault pays one decode per file to build the cache. That
 happens in the background; afterwards it is essentially free.
 
-**Clear thumbnail cache** is a command if you ever need to force a rebuild.
+**Clear cached data** is a command if you ever need to force a rebuild; choose
+**Thumbnails** from the list it offers.
 
 ## Playing clips
 
@@ -121,7 +124,8 @@ Release artifacts are `main.js`, `manifest.json` and `styles.css`.
 
 `onnxruntime-node` is a runtime dependency, not a bundled one: it is a native
 N-API addon, so `node_modules/onnxruntime-node/` has to stay next to `main.js`.
-Only TransNetV2 and the sound view need it — everything else works without it.
+Only TransNetV2 and the sound analysis need it — everything else works without
+it.
 
 It has to be loaded with `require`, and by **absolute path**. Obsidian evaluates
 `main.js` in the renderer, so the `require` in scope is Electron's, and its
@@ -146,6 +150,9 @@ src/
     media-index.ts      live index + vault-event reconciliation
     thumbnails.ts       tiered, disk-cached proxy generation + priority queue
     shots.ts            detection queue, candidate cache, pure shot building
+    scenes.ts           scenes and cut labels: pure model, and the note's block
+    scene-store.ts      reads and writes the scene note beside each film
+    vault-cache.ts      _cache/cinema-canvas/ in the vault, and the move there
     transnet.ts         TransNetV2 inference over an ffmpeg rawvideo pipe
     onnx.ts             onnxruntime-node loader and session cache, shared
     sound.ts            sound analysis queue, cache, pinned model download
@@ -159,9 +166,14 @@ src/
     media-cell.ts       one cell: element, thumbnail request, hover preview
     shot-strip.ts       the sticky bottom strip: cuts and sound, as two tabs
     shot-controls.ts    cutting sliders + Find cuts, shared by both shot views
-    clip-view.ts        one tab per clip: player, rhythm ribbon, segment grid
+    clip-view.ts        one film, one tab: ribbon, grid, scene list, and the
+                        switch to the scenes and sound halves
+    scene-board.ts      the scenes half: the tag list, and scenes filed by tag
+    scene-picker.ts     the searchable "add to a scene" list
+    scene-block.ts      draws a scene note's block in reading view
+    text-prompt.ts      one-line prompt for scene titles and cut labels
     segment-player.ts   frame-accurate segment playback, shared by every player
-    sound-view.ts       one tab per file: dialogue, music, effects, silence lanes
+    sound-pane.ts       the sound half of that tab: lanes, lists, and the run
     sound-lanes.ts      lane colours and canvas drawing, shared by strip + view
     lightbox.ts         full-screen viewer
 ```
@@ -179,7 +191,7 @@ at from the outside:
 - **Cuts** — one thumbnail per cut, scrolling sideways, with the clip's shot
   count, average shot length, and its shortest and longest shot in the header.
   Under each thumbnail is where that shot starts and how long it runs.
-- **Sound** — the same four lanes the sound view draws, across the whole clip.
+- **Sound** — the same four lanes the sound half draws, across the whole clip.
   Hover to read a moment, click to play from there.
 
 Each tab carries a **dot** when its own side has never been run for this clip, so
@@ -192,10 +204,12 @@ The canvas above never changes — it stays one cell per file, so "which file is
 this" and "what is inside it" stay two separate questions.
 
 Clips are never split on disk. A shot is a start and end time against the
-original file, so a 40-shot scene is one file and forty seeks. As everywhere else
-in this plugin, nothing is written to the vault: shot lists cache to
-`<plugin folder>/shots/`, keyed by path + size + mtime, so they survive restarts
-and invalidate themselves when you re-export.
+original file, so a 40-shot scene is one file and forty seeks. Shot lists cache
+to `_cache/cinema-canvas/shots/` in the vault — the folder this vault already
+gitignores as rebuildable — keyed by path + size + mtime, so they survive
+restarts and invalidate themselves when you re-export. Renaming or moving a clip
+inside Obsidian carries its shot list over instead of throwing it away. Caches
+written into the plugin folder by earlier versions are moved there on startup.
 
 | Action | Mouse | Key |
 | --- | --- | --- |
@@ -206,8 +220,11 @@ and invalidate themselves when you re-export.
 | Find the cuts, or analyse the sound | the button on the empty tab | — |
 | Re-run either one | the refresh button in the strip | — |
 | Change how the clip is cut | the two sliders in the strip header | — |
-| Open the clip's own tab | the segments button in the strip header | — |
-| Open the clip's sound tab | the waveform button in the strip header | — |
+| Open the clip in the cut view | the cuts button in the strip header | — |
+| Stop finding cuts | the stop button while it runs | — |
+| Open the clip's sound half | the waveform button in the strip header | — |
+| Stop what is playing | click any other cell, a folder header, or the background | — |
+| Stop what is playing | switch to another tab | — |
 
 **ffmpeg** must be on your system for both halves — TransNetV2 reads its frames
 through it, and the sound analysis reads its audio the same way. Leave **ffmpeg
@@ -230,25 +247,43 @@ afterwards — so tuning is a slider, not a re-scan. Verified: the cached candid
 list and a full per-frame dump produce identical shot lists at every threshold
 above the floor.
 
-### The clip view
+### The cut view
 
 The strip is for navigating one clip while the rest of the vault is still on
-screen. When the clip itself is the subject, the segments button in the strip
-header (or **Open selected clip in the segment view**) gives it a whole tab:
+screen. When the clip — or a whole film — is the subject, give it a tab of its
+own:
+
+- right-click any video in the file explorer → **Open in cut view**, whether or
+  not the canvas scans that folder,
+- **Open current file in the cut view** in the command palette,
+- the cuts button in the strip header, or **Open selected clip in the cut view**.
+
+The tab holds:
 
 - **the player**, which you can scrub anywhere — seeing what surrounds a cut is
   most of the point,
-- **the ribbon** under it, where each segment is drawn as wide as it is long.
-  This is the only place shot length is to scale, so a run of quick cuts looks
-  like a run of quick cuts, and a two-minute held take looks like the wall it is.
-- **the grid**, one card per segment, wrapping over the full width instead of
-  scrolling sideways. Cards are all the same size on purpose: here a segment is
-  a thing to click, and the ribbon already showed you which is which.
+- **the ribbon**, where each cut is drawn as wide as it is long. This is the
+  only place shot length is to scale, so a run of quick cuts reads as a dark
+  stretch, and a two-minute held take looks like the wall it is,
+- **the grid**, one card per cut, to select from and drag out of. Cards are all
+  the same size on purpose: here a cut is a thing to click, and the ribbon
+  already showed you which is which,
+- **the scene list**, beside the grid: **No Cut**, meaning the whole film, and
+  then every scene of it. It stands next to the cards rather than down the side
+  of the tab, so the player and the ribbon keep the full width and none of
+  their height goes to it. Every row plays what it names — No Cut plays the
+  film, a scene plays its own cuts, one after another,
+- **the switch**, which turns the same tab to the **sound half**: the same
+  file, the same player, the other question.
 
-All three share one playhead. Click a segment anywhere and the other two follow;
-scrub the player past a cut and the highlight moves with it. Clicking a segment
-confines playback to it — it repeats or pauses at its last frame, depending on
-the loop button — and scrubbing out of it releases that.
+The header carries nothing a row already does. A scene is played, renamed and
+deleted from its own row, and left by clicking No Cut, so none of those is a
+button at the top as well.
+
+All of them share one playhead. Click a cut anywhere and the rest follow; scrub
+the player past a cut and the highlight moves with it. Clicking a cut confines
+playback to it — it repeats or pauses at its last frame, depending on the loop
+button — and scrubbing out of it releases that.
 
 Segments stop **on their own last frame**, in every player — the clip view, the
 lightbox, and a canvas cell. The boundary is judged once per presented frame
@@ -256,18 +291,184 @@ with `requestVideoFrameCallback`, not on `timeupdate`, which Chromium fires abou
 every 250 ms: checked that way, the same 82 segments ran on for 4 frames of the
 next shot on average and 8 at worst.
 
-The same sliders and the same Find cuts button are in this view's header, doing
-the same thing. Changing a parameter here re-cuts the clip without touching the
-player, which is the point: the frame stays where it is while the cuts around it
-move.
+The same sliders are in this view's header, doing the same thing, and so is the
+button that runs the network: **Find cuts** on a film with none, **Re-cut** on
+one already cut, **Stop** while it runs. It is the accented button at the end of
+the header, set apart from the icons by a rule, in the same place the sound half
+puts **Analyse sound** — and the header survives full screen, so the run can be
+started from across the room. Re-cutting keeps every scene and label: both are
+anchored to a time in the film, not to a cut number. Changing a parameter re-cuts the film without touching the player, which
+is the point: the frame stays where it is while the cuts around it move. While a
+slider is being dragged only the ribbon follows; the cards are rebuilt when you
+let go, because a film has well over a thousand of them.
+
+#### A whole film
+
+A two-hour film comes to roughly 1,300 cuts at the default confidence — measured
+by repeating the reference clip's real detections twenty times end to end. The
+view is built for that:
+
+- **Find cuts says how long it will take** before you press it — about 27
+  minutes for two hours, at the measured rate of 83 s per 370 s — and while it
+  runs the header shows the percentage and the time left.
+- **It can be stopped**, from the header or the strip. ffmpeg is killed at once
+  (measured: 7 ms), nothing is cached and nothing is marked failed, so Find cuts
+  starts it again from the beginning. Asking twice joins the run already going
+  rather than queuing another half hour behind it.
+- **Stills are only made for cards near the screen**, and a card scrolled away
+  before its still arrives withdraws the request. Every still is a seek into the
+  film; making all of them up front would be an hour of seeking before the first
+  one you could see.
+- **Renaming or moving the film inside Obsidian keeps everything**: its shot
+  list, its sound readings and its scene note all follow it.
+
+Obsidian still stutters in short bursts while TransNetV2 runs, because inference
+happens in Obsidian's own process. Moving it out of process is the next thing to
+fix.
+
+#### Scenes and labels
+
+A **scene** is any set of cuts you choose, with a name. The cuts need not be next
+to each other, and one cut can be in as many scenes as you like, so a scene is a
+grouping you make — every shot of one character, one location, every insert —
+rather than a division of the film. A **label** is a line of text on one cut —
+"close-up", "insert", a character's name.
+
+**Choosing cuts.** Click a card to play it and select it. `Ctrl`-click (`Cmd`
+on a Mac) adds or removes a card, and `Shift`-click selects the run from the
+last card clicked. `Esc` clears the selection. With nothing selected, an action
+applies to the cut under the playhead.
+
+**Making and filling scenes.**
+
+- **New scene** at the top of the panel, or `N`, makes a scene of the selected
+  cuts, or an empty one to fill later.
+- **Drag** cards onto a scene in the panel to add them, or onto New scene to
+  make a scene of them. Dragging a selected card drags the whole selection.
+- Right-click a card for **New scene from…**, **Add to a scene…** (a searchable
+  list, also `A`), **Remove from** each scene it is in, and **Label this cut**
+  (also `T`; save it empty to remove the label).
+- Every card shows a coloured bar for each scene it is in; hover the bars for
+  their names.
+
+**The list.** The first row is **No Cut**: the whole film, with nothing picked,
+which is where the view starts and the way back. Below it each scene shows its
+name, its number of cuts and how long it plays. Hover a row to **play** the
+scene, **rename** it (or double-click its name) or **delete** it. Deleting
+doesn't ask first; the notice it shows has an **Undo** button, and deleting a
+scene never touches the cuts themselves.
+
+**Showing a scene.** Click its row and this view shows it — a film is one tab,
+never a tab per scene, so the player keeps playing and the list stays where it
+is. Click the same row again, click No Cut, or press `Esc` to come back to the
+whole film. The switch at the top, or `V`, chooses between two ways of showing
+the scene:
+
+- **Its cuts**: only the scene's cuts, laid end to end on the ribbon so it reads
+  as the scene plays. Each card has a remove button, and `Delete` removes the
+  selected cuts.
+- **All cuts**: the whole film with the scene's cuts highlighted and the rest
+  faded, for seeing where they fall and picking more — select cards and press
+  `A`. A scene you have just made is shown this way.
+
+In both, **play** (`P`) plays the scene's cuts one after another, skipping what
+lies between them, and `←` `→` step through them. Open the film in a split pane
+if you want two of these side by side; cards drag between them.
+
+#### Tags: the Scenes half
+
+The switch in the header has a third position, **Scenes**, between Cuts and
+Sound. It keeps the player and swaps what is under it for every scene of the
+film, **filed under tags**: over the shoulder, shot / counter shot, two shot,
+ensemble, action, rapid cuts, and whatever else you add.
+
+- **The tag list** stands on the left. It is one list for every film — a two
+  shot is a two shot everywhere — and it starts with a handful of common ones.
+  Type into **Add a tag** and press Enter to add one; the **×** on a row takes
+  it off the list and off this film's scenes, with an undo in the notice.
+  Clicking a tag shows only its scenes; clicking it again, or `Esc`, shows all.
+- **The board** has one group per tag, with **Untagged** first while anything is
+  left in it. A scene with two tags is in both groups: a tag is a way to find a
+  scene, not a place it lives.
+- **Tagging.** Drag a scene onto a tag (a group or a row in the list), drag a
+  tag onto a scene, or use the **+** on a scene card, which lists every tag with
+  a tick on the ones it has, plus **New tag…**. Right-click does the same. The
+  **×** on a chip takes that tag off. Dragging adds and never moves, so to
+  re-file a scene, add the new tag and take the old one off.
+- Click a card to **play** the scene; double-click it, or its film button, to
+  show its cuts on the Cuts half. Each scene's tags also show under its name in
+  the Cuts half's list.
+
+Which scene carries which tag is saved in the film's scene note, as a `tags`
+list on the scene. Taking a tag off the shared list does not open other films'
+notes: they keep it, and show it in italics as *not on your list* the next time
+you look, where the same **×** takes it off them too. Tags are one tag whatever
+their case.
+
+Both scenes and labels are anchored to **times, never to cut numbers**. A cut's
+number is only its position in a list the confidence slider rebuilds, so "cut
+412" names a different frame after a retune. A scene stores the middle of each
+of its cuts, and shows whichever cut contains that time now, so scenes follow
+the cuts when you re-cut. A label shows on whichever cut contains its time, so
+raising the confidence until its cut disappears moves it onto the cut that
+swallowed it instead of losing it.
+
+They are saved in a **note beside the film**, named after it: `Heat.mkv` keeps
+its scenes in `Heat.mkv.scenes.md`. It is an ordinary note — it syncs and
+versions with the vault, survives clearing every cache, and reads fine without
+the plugin. The plugin owns one fenced block in it and leaves everything else
+alone, so write whatever you like around it:
+
+````
+```cinema-scenes
+{
+  "scenes": [
+    {"id":"k2f9qa","title":"The Marquis","tags":["Two shot"],"cuts":[12.5,1705.8,3310.25]},
+    {"id":"0xw3b1","title":"Stagecoach","cuts":[12.5,40.1]}
+  ],
+  "labels": [
+    {"at":12.5,"text":"close-up"}
+  ]
+}
+```
+````
+
+Each scene has an `id`, which is how the view finds it, so a scene can be renamed
+freely. Its `cuts` are times in seconds, one inside each cut; its `tags`, if it
+has any, are text. If you write the
+block by hand, give each scene an id made of letters, digits, `-` or `_`, used by
+no other scene.
+
+In reading view the block is drawn as a list of scenes; clicking one opens the
+film in the cut view and shows that scene there.
+In editing view it stays JSON and can be edited by hand. If a hand edit leaves it
+unreadable, the cut view says so in its header and **refuses to save anything**
+until it is fixed, rather than overwriting it.
 
 | Action | Mouse | Key |
 | --- | --- | --- |
-| Play a segment | click a card or a ribbon block | — |
-| Next / previous segment | — | `←` `→` or `j` `k` |
+| Play a cut, and select it | click a card or a ribbon block | — |
+| Add or remove a card from the selection | `Ctrl`-click / `Cmd`-click | — |
+| Select a run of cards | `Shift`-click | — |
+| Clear the selection, then go back to the whole film | — | `Esc` |
+| Next / previous cut | — | `←` `→` or `j` `k` |
 | Play or pause | the player's own controls | `Space` |
-| Repeat the segment | the loop button | `L` |
-| Full screen player | the expand button | `F` |
+| Repeat the cut or scene | the loop button | `L` |
+| Label the cut | right-click a card → Label this cut | `T` |
+| New scene from the selection | New scene in the panel, or drag cards onto it | `N` |
+| Add the selection to a scene | drag cards onto the scene, or right-click → Add to a scene… | `A` |
+| Remove from a scene | right-click → Remove from…, or the × on a card while its scene is shown | `Delete` while a scene is shown |
+| Show a scene in this view | click its row in the list | — |
+| Back to the whole film | click No Cut | `Esc` |
+| Its cuts / all cuts, for the scene shown | the switch in the header | `V` |
+| Play the whole scene | the play button on its row | `P` |
+| Play the whole film | the play button on No Cut | — |
+| Rename a scene | the pencil on its row, or double-click its name | — |
+| Delete a scene | the bin on its row | — |
+| Cuts or sound | the switch in the header | — |
+| Show or hide the scene list | the list button | — |
+| Full screen, keeping every control | the expand button | `F` |
+| Pause the film, keeping the frame | switch to another tab | — |
 
 ### Why ffmpeg no longer finds the cuts
 
@@ -287,7 +488,7 @@ computation on a 0–1 scale, and finds a strict subset of the same cuts.
 
 A strip you have to eyeball is worth less than one you can trust, so the choice
 itself was removed rather than left as a faster wrong answer. ffmpeg is still
-required — it decodes the frames TransNetV2 reads, and the audio the sound view
+required — it decodes the frames TransNetV2 reads, and the audio the analysis
 reads.
 
 **Cache files written by the old detector are ignored**, not migrated: `scdet`
@@ -324,8 +525,8 @@ the CPU otherwise — DirectML was measured 3.7× faster here, with identical
 output. Nothing about your vault leaves the machine.
 
 Detection runs one clip at a time — it is a full decode, and anything more would
-fight the UI for the same cores. The refresh button in the strip forces a fresh
-decode; you only need it if the file itself changed.
+fight the UI for the same cores — and any run can be stopped. The refresh button
+in the strip forces a fresh decode; you only need it if the file itself changed.
 
 Playing a shot from the strip plays only that shot and stops at the cut. In the
 full-screen viewer, playback is confined to the shot but scrubbing is not —
@@ -333,17 +534,26 @@ seeing what surrounds a shot is usually the point of opening it big.
 
 ## Sound
 
-The shot views ask where the picture changes. The **sound view** asks what you
-are hearing: where the score comes in, how long a scene goes without a line,
-where the mix drops out. It is built for whole films, which are usually not on
-the canvas at all, so it opens from anywhere a file is:
+The cuts ask where the picture changes. The **sound half** asks what you are
+hearing: where the score comes in, how long a scene goes without a line, where
+the mix drops out.
+
+It is the other half of the film's own tab, not a tab of its own. Both questions
+are about the same file at the same moment, so they share one tab, one player
+and one playhead, and a switch in the header moves between them. A dot on the
+switch marks the half that has never been run for this file. It opens from
+anywhere a file is:
 
 - right-click any video or audio file → **Open in sound view**
 - **Open current file in the sound view** in the command palette
-- the waveform button on the strip's Sound tab, or in the clip view
+- the waveform button on the strip's Sound tab
+
+Any of them reveals the file's tab and turns it to the sound half; none of them
+opens a second tab. A file with no picture — an mp3 — has no cuts half, and so
+no switch.
 
 The strip's Sound tab draws the same lanes for a clip you are looking at on the
-canvas. This view is what a whole film gets: the lanes to scale across the full
+canvas. The tab is what a whole film gets: the lanes to scale across the full
 running time, a zoomable detail set under the playhead, and the lists.
 
 A film's audio is one mixed track, so dialogue, music and effects are rarely
@@ -406,8 +616,10 @@ silence, solo piano, rain and thunder, gunshots, and speech over piano at −12 
 - **14 s** of wall time on the CPU, which is about **9 minutes for a two-hour
   film**. The CPU is used rather than DirectML on purpose: the runs are small,
   and a 2 s window measured 42 ms on the CPU against 298 ms through the GPU.
-- The cache is about **0.6 MB per two-hour film**, in `<plugin>/sound/`, keyed by
-  path + size + mtime. Re-labelling a two-hour film for a slider takes about 6 ms.
+- The cache is about **0.6 MB per two-hour film**, in the vault's
+  `_cache/cinema-canvas/sound/`, keyed by path + size + mtime, and it follows a
+  file renamed inside Obsidian. Re-labelling a two-hour film for a slider takes
+  about 6 ms.
 
 The first audio track is analysed, which on a film with a commentary is the main
-mix. **Clear sound analysis** is a command.
+mix. **Clear cached data** is a command; choose **Sound analysis** from it.

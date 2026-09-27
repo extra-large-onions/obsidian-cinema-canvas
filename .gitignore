@@ -32,3 +32,6 @@ sound/
 
 # Downloaded model weights: TransNetV2 (31 MB), Silero VAD and PANNs (330 MB)
 models/
+
+# Downloaded ONNX runtime (onnxruntime-node, fetched on first use)
+runtime/

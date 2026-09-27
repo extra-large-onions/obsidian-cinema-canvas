@@ -8,7 +8,7 @@ import {
 /**
  * Drawing the sound lanes, shared by everything that shows them.
  *
- * The dedicated sound view draws them across a whole tab; the strip along the
+ * The sound half of a film's tab draws them full width; the strip along the
  * bottom of the canvas draws the same four lanes an inch high. They have to
  * mean the same thing in both places — the same colours, the same opacity for a
  * lane that is only half on, the same idea of what "effects" is — so there is

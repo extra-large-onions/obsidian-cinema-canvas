@@ -9,7 +9,14 @@ import {
 import { MediaItem, Shot } from '../types';
 import { cyrb53 } from '../utils/hash';
 import { releaseModels } from './onnx';
-import { MODEL_BYTES, MODEL_URL, detectWithTransNet } from './transnet';
+import { hasRuntime, installRuntime } from './ort-runtime';
+import {
+	DetectionCancelled,
+	MODEL_BYTES,
+	MODEL_URL,
+	detectWithTransNet,
+} from './transnet';
+import { cacheDir, ensureDir, migrateDir } from './vault-cache';
 
 /**
  * What finds the cuts: TransNetV2, a network trained on labelled cuts.
@@ -76,6 +83,12 @@ interface Job {
 	resolve: (shots: Shot[] | null) => void;
 }
 
+interface RunningJob extends Job {
+	controller: AbortController;
+	/** `Date.now()` when decoding began, for a time-left estimate. */
+	startedAt: number;
+}
+
 export interface ShotOptions {
 	/** Still needed: TransNetV2 reads its frames through an ffmpeg pipe. */
 	ffmpegPath: string;
@@ -98,7 +111,8 @@ export const SCORE_FLOOR = 1;
 const MODEL_FILE = 'models/transnetv2.onnx';
 
 /**
- * Shot boundaries for every indexed clip, cached to disk beside the thumbnails.
+ * Shot boundaries for any clip or film, cached in the vault under
+ * `_cache/cinema-canvas/shots/`.
  *
  * Nothing is ever cut out of the source. A shot is a `{ start, end }` pair
  * against the original file, so a 40-shot scene costs one file on disk and
@@ -106,7 +120,10 @@ const MODEL_FILE = 'models/transnetv2.onnx';
  * lightbox all then treat those pairs as ordinary items.
  */
 export class ShotIndex extends Component {
+	/** Vault-relative: `_cache/cinema-canvas/shots`. */
 	private readonly dir: string;
+	/** Where the cache was written before 0.11; moved into `dir` on startup. */
+	private readonly legacyDir: string;
 	/** Vault path -> raw detection, for the current mtime only. */
 	private readonly detections = new Map<string, Detection>();
 	/** Shots derived at the current confidence; dropped when it changes. */
@@ -117,9 +134,13 @@ export class ShotIndex extends Component {
 	private readonly failed = new Set<string>();
 	/** Vault path -> why the last attempt failed, for the strip to show. */
 	private readonly errors = new Map<string, string>();
+	/** Vault path -> the run already queued for it, which a second request joins. */
+	private readonly waiting = new Map<string, Promise<Shot[] | null>>();
+	/** Clips whose last run was stopped by hand, which is not finding nothing. */
+	private readonly cancelled = new Set<string>();
 	private readonly queue: Job[] = [];
 	private readonly listeners = new Set<() => void>();
-	private running: Job | null = null;
+	private running: RunningJob | null = null;
 	/** 0-1 through the running job, or null when it cannot be measured. */
 	private runningProgress: number | null = null;
 	private disposed = false;
@@ -132,13 +153,15 @@ export class ShotIndex extends Component {
 		options: ShotOptions,
 	) {
 		super();
-		this.dir = normalizePath(`${pluginDir}/shots`);
+		this.dir = cacheDir('shots');
+		this.legacyDir = normalizePath(`${pluginDir}/shots`);
 		this.options = options;
 	}
 
 	override onunload(): void {
 		this.disposed = true;
 		this.queue.length = 0;
+		this.running?.controller.abort();
 		this.listeners.clear();
 		releaseModels();
 	}
@@ -191,6 +214,37 @@ export class ShotIndex extends Component {
 		return this.errors.get(item.path) ?? null;
 	}
 
+	/** True when the last run on `item` was stopped rather than finished. */
+	wasCancelled(item: MediaItem): boolean {
+		return this.cancelled.has(item.path);
+	}
+
+	/** When the running detection of `item` began, or null if it is not running. */
+	startedAt(item: MediaItem): number | null {
+		return this.running?.item.path === item.path
+			? this.running.startedAt
+			: null;
+	}
+
+	/**
+	 * Stops a queued or running detection of `item`.
+	 *
+	 * Nothing is cached and nothing is marked failed, so the next Find cuts
+	 * starts it again from the beginning.
+	 */
+	cancel(item: MediaItem): void {
+		const queued = this.queue.findIndex((job) => job.item.path === item.path);
+		if (queued >= 0) {
+			const [job] = this.queue.splice(queued, 1);
+			this.cancelled.add(item.path);
+			job?.resolve(null);
+			this.progressListener?.(this.pending);
+			this.emit();
+		}
+		if (this.running?.item.path === item.path)
+			this.running.controller.abort();
+	}
+
 	/** True when detection ran on `item` and produced nothing usable. */
 	hasFailed(item: MediaItem): boolean {
 		return this.failed.has(this.keyFor(item));
@@ -200,7 +254,10 @@ export class ShotIndex extends Component {
 	async init(): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		try {
-			if (!(await adapter.exists(this.dir))) await adapter.mkdir(this.dir);
+			// Before 0.11 these lived in the plugin folder. They are moved, not
+			// re-detected: a feature film is most of half an hour of inference.
+			await migrateDir(adapter, this.legacyDir, this.dir);
+			await ensureDir(adapter, this.dir);
 			const listing = await adapter.list(this.dir);
 			for (const path of listing.files) {
 				if (!path.endsWith('.json')) continue;
@@ -276,12 +333,20 @@ export class ShotIndex extends Component {
 			if (this.failed.has(this.keyFor(item)))
 				return Promise.resolve(null);
 		}
-		return new Promise<Shot[] | null>((resolve) => {
+		// Asking again while a run is queued — a second click, or the strip and
+		// the cut view both — joins it instead of queuing another behind it,
+		// which for a film would be another half hour.
+		const waiting = this.waiting.get(item.path);
+		if (waiting) return waiting;
+		this.cancelled.delete(item.path);
+		const promise = new Promise<Shot[] | null>((resolve) => {
 			this.queue.push({ item, resolve });
 			this.progressListener?.(this.pending);
 			this.emit();
 			void this.pump();
-		});
+		}).finally(() => this.waiting.delete(item.path));
+		this.waiting.set(item.path, promise);
+		return promise;
 	}
 
 	/** Detects every clip with no cached list yet; resolves to how many worked. */
@@ -308,7 +373,10 @@ export class ShotIndex extends Component {
 		this.derived.clear();
 		this.failed.clear();
 		this.errors.clear();
-		this.queue.length = 0;
+		// Resolved, not just dropped: a caller awaiting a queued run would
+		// otherwise wait forever.
+		for (const job of this.queue.splice(0)) job.resolve(null);
+		this.running?.controller.abort();
 		for (const name of names) {
 			try {
 				await adapter.remove(normalizePath(`${this.dir}/${name}`));
@@ -338,6 +406,35 @@ export class ShotIndex extends Component {
 			} catch {
 				// A file we cannot delete is only wasted disk.
 			}
+		}
+	}
+
+	/**
+	 * Carries a clip's detection over to its new path.
+	 *
+	 * Detections are keyed by path, and a feature film costs most of half an
+	 * hour of inference, so renaming or moving one must not quietly throw that
+	 * away. `item` is the clip at its new path; a rename leaves its size and
+	 * mtime alone, so the old cache file's name can be rebuilt from it.
+	 */
+	async rename(oldPath: string, item: MediaItem): Promise<void> {
+		const detection = this.detections.get(oldPath);
+		if (!detection || this.detections.has(item.path)) return;
+		this.detections.delete(oldPath);
+		this.derived.delete(oldPath);
+		this.errors.delete(oldPath);
+		this.detections.set(item.path, detection);
+		this.emit();
+		const oldName = this.keyFor(item, oldPath);
+		await this.save(item, detection);
+		if (!this.onDisk.has(oldName)) return;
+		this.onDisk.delete(oldName);
+		try {
+			await this.app.vault.adapter.remove(
+				normalizePath(`${this.dir}/${oldName}`),
+			);
+		} catch {
+			// Only wasted disk; `prune` gets it later.
 		}
 	}
 
@@ -388,8 +485,17 @@ export class ShotIndex extends Component {
 		);
 	}
 
-	/** True when the model is on disk and TransNetV2 can be run. */
+	/**
+	 * True when TransNetV2 can be run: the model is on disk and so is the
+	 * ONNX runtime, which is downloaded alongside it.
+	 */
 	async hasModel(): Promise<boolean> {
+		const runtimeDir = this.runtimeDir();
+		if (!runtimeDir || !(await hasRuntime(runtimeDir))) return false;
+		return this.hasModelFile();
+	}
+
+	private async hasModelFile(): Promise<boolean> {
 		if (this.options.modelPath.trim()) {
 			// A path outside the vault is not something the vault adapter can
 			// answer for, so ask the file system directly.
@@ -411,13 +517,23 @@ export class ShotIndex extends Component {
 	}
 
 	/**
-	 * Fetches the ONNX export into the plugin folder.
-	 *
-	 * 31 MB, once, from Hugging Face. Nothing about the vault leaves the
-	 * machine: this is a plain GET for a file, and inference then runs locally.
+	 * Fetches whatever TransNetV2 is missing into the plugin folder: the ONNX
+	 * runtime (112 MB, from the npm registry; see `ort-runtime.ts`) and the
+	 * ONNX export (31 MB, from Hugging Face). Each happens once. Nothing about
+	 * the vault leaves the machine: these are plain GETs for public files, and
+	 * inference then runs locally.
 	 */
 	async downloadModel(): Promise<boolean> {
-		if (this.options.modelPath.trim()) return false;
+		const runtimeDir = this.runtimeDir();
+		if (!runtimeDir) return false;
+		try {
+			await installRuntime(runtimeDir);
+		} catch (err) {
+			console.error('Cinema canvas: installing the ONNX runtime failed', err);
+			return false;
+		}
+		if (this.options.modelPath.trim() || (await this.hasModelFile()))
+			return this.hasModelFile();
 		const target = normalizePath(`${this.pluginDir}/${MODEL_FILE}`);
 		const dir = normalizePath(`${this.pluginDir}/models`);
 		const adapter = this.app.vault.adapter;
@@ -446,29 +562,38 @@ export class ShotIndex extends Component {
 		if (this.running || this.disposed) return;
 		const job = this.queue.shift();
 		if (!job) return;
-		this.running = job;
+		const controller = new AbortController();
+		this.running = { ...job, controller, startedAt: Date.now() };
 		this.runningProgress = 0;
 		// The strip watches this to swap its buttons for a progress readout.
 		this.emit();
 
 		const key = job.item.path;
 		let detection: Detection | null = null;
+		let cancelled = false;
 		try {
-			detection = await this.runDetection(job.item);
+			detection = await this.runDetection(job.item, controller.signal);
 			this.errors.delete(key);
 		} catch (err) {
-			// A missing tool, an unreadable file, or a codec ffmpeg lacks. The
-			// message is the only thing that tells those apart, so it is kept
-			// and also logged: the console gets the stack, the strip does not.
-			this.errors.set(key, messageOf(err));
-			console.error('Cinema canvas: shot detection failed', err);
+			if (err instanceof DetectionCancelled || controller.signal.aborted) {
+				// Stopped by hand. Not a failure: the next press starts over.
+				cancelled = true;
+				this.cancelled.add(key);
+			} else {
+				// A missing tool, an unreadable file, or a codec ffmpeg lacks.
+				// The message is the only thing that tells those apart, so it
+				// is kept and also logged: the console gets the stack, the
+				// strip does not.
+				this.errors.set(key, messageOf(err));
+				console.error('Cinema canvas: shot detection failed', err);
+			}
 		}
 		let shots: Shot[] | null = null;
 		if (detection) {
 			this.detections.set(key, detection);
 			this.derived.delete(key);
 			shots = this.get(job.item);
-		} else {
+		} else if (!cancelled) {
 			this.failed.add(this.keyFor(job.item));
 		}
 
@@ -480,10 +605,13 @@ export class ShotIndex extends Component {
 		if (!this.disposed) void this.pump();
 	}
 
-	private async runDetection(item: MediaItem): Promise<Detection | null> {
+	private async runDetection(
+		item: MediaItem,
+		signal: AbortSignal,
+	): Promise<Detection | null> {
 		const full = this.fullPathOf(item);
 		if (!full) return null;
-		const detection = await this.runTransNet(item, full);
+		const detection = await this.runTransNet(item, full, signal);
 		if (!detection) return null;
 		await this.save(item, detection);
 		return detection;
@@ -492,13 +620,14 @@ export class ShotIndex extends Component {
 	private async runTransNet(
 		item: MediaItem,
 		full: string,
+		signal: AbortSignal,
 	): Promise<Detection | null> {
 		const modelPath = this.modelPath();
 		if (!modelPath)
 			throw new Error(
 				'The vault is not on a normal file system, so the model cannot be located.',
 			);
-		if (!(await this.hasModel()))
+		if (!(await this.hasModelFile()))
 			throw new Error(
 				`No model at ${modelPath}. Download it in settings, under Shot detection.`,
 			);
@@ -513,6 +642,7 @@ export class ShotIndex extends Component {
 			runtimeDir,
 			filePath: full,
 			floor: SCORE_FLOOR,
+			signal,
 			onProgress: (fraction) => {
 				if (this.running?.item.path !== item.path) return;
 				this.runningProgress = fraction;
@@ -533,8 +663,9 @@ export class ShotIndex extends Component {
 		return adapter.getFullPath(item.file.path);
 	}
 
-	private keyFor(item: MediaItem): string {
-		const hash = cyrb53(item.path).toString(36);
+	/** @param path the path to name it for; a rename asks for the old one. */
+	private keyFor(item: MediaItem, path = item.path): string {
+		const hash = cyrb53(path).toString(36);
 		const size = item.file.stat.size.toString(36);
 		// The `_transnet` suffix is kept even though there is nothing to tell
 		// it apart from any more: it is the name every existing cache file

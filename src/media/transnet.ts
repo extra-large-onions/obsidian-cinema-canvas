@@ -40,6 +40,20 @@ export const MODEL_URL =
 /** Size of that download, for a progress message. */
 export const MODEL_BYTES = 31250929;
 
+/**
+ * Wall time per second of video, measured end to end on the 370 s reference
+ * clip (83 s, DirectML on an integrated GPU). Used only to say how long a run
+ * will take before it starts: about 27 minutes for a two-hour film.
+ */
+export const DETECTION_SECONDS_PER_SECOND = 83 / 370;
+
+/** Thrown when a run is stopped through its `signal`; not a failure. */
+export class DetectionCancelled extends Error {
+	constructor() {
+		super('Shot detection was stopped.');
+	}
+}
+
 export interface TransNetResult {
 	duration: number;
 	candidates: Candidate[];
@@ -56,6 +70,11 @@ export interface TransNetRequest {
 	floor: number;
 	/** 0-1, for a progress readout; called at most once per window. */
 	onProgress?: (fraction: number) => void;
+	/**
+	 * Stops the run: ffmpeg is killed and `DetectionCancelled` is thrown. A
+	 * whole film is most of half an hour, so this has to be possible.
+	 */
+	signal?: AbortSignal;
 }
 
 const DURATION_LINE = /Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/;
@@ -78,6 +97,8 @@ export async function detectWithTransNet(
 		providers: ['dml', 'cpu'],
 	});
 	const ort = loadOrt(request.runtimeDir);
+	const signal = request.signal;
+	if (signal?.aborted) throw new DetectionCancelled();
 
 	const child = spawn(
 		request.ffmpegPath.trim() || 'ffmpeg',
@@ -98,6 +119,12 @@ export async function detectWithTransNet(
 		],
 		{ windowsHide: true },
 	);
+	// Killing ffmpeg ends its stdout, which ends the read loop below; the
+	// checks after it turn that into `DetectionCancelled`.
+	const kill = (): void => {
+		child.kill();
+	};
+	signal?.addEventListener('abort', kill, { once: true });
 
 	let stderr = '';
 	child.stderr?.on('data', (d: Buffer) => {
@@ -157,6 +184,7 @@ export async function detectWithTransNet(
 	try {
 		let tail: Buffer = Buffer.alloc(0);
 		for await (const chunk of child.stdout as AsyncIterable<Buffer>) {
+			if (signal?.aborted) throw new DetectionCancelled();
 			if (expectedFrames === 0) expectedFrames = estimateFrames(stderr);
 			tail = tail.length ? Buffer.concat([tail, chunk]) : chunk;
 			let offset = 0;
@@ -170,9 +198,14 @@ export async function detectWithTransNet(
 		}
 	} catch (err) {
 		child.kill();
+		signal?.removeEventListener('abort', kill);
+		if (err instanceof DetectionCancelled || signal?.aborted)
+			throw new DetectionCancelled();
 		throw new Error(`Reading frames from ffmpeg failed: ${String(err)}`);
 	}
 	await new Promise<void>((resolve) => child.on('close', () => resolve()));
+	signal?.removeEventListener('abort', kill);
+	if (signal?.aborted) throw new DetectionCancelled();
 
 	if (realFrames === 0 || !lastFrame)
 		throw new Error(

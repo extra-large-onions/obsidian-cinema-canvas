@@ -4,6 +4,8 @@ import {
 	parseExtensionList,
 } from './media/extensions';
 import { MediaIndex } from './media/media-index';
+import { SceneStore } from './media/scene-store';
+import { BLOCK_LANGUAGE, tagKey } from './media/scenes';
 import { ShotIndex } from './media/shots';
 import { SoundIndex } from './media/sound';
 import type { SoundParamKey } from './media/sound-analysis';
@@ -16,13 +18,15 @@ import {
 import type { ShotOptions } from './media/shots';
 import { DETECTOR_LABEL } from './media/shots';
 import { debounce } from './utils/debounce';
+import { CachePickerModal } from './view/cache-picker';
+import type { ClearTarget } from './view/cache-picker';
 import { CinemaCanvasView, VIEW_TYPE_CINEMA_CANVAS } from './view/canvas-view';
 import { CinemaClipView, VIEW_TYPE_CINEMA_CLIP } from './view/clip-view';
-import { CinemaSoundView, VIEW_TYPE_CINEMA_SOUND } from './view/sound-view';
+import { renderSceneBlock } from './view/scene-block';
 import type { ShotParamKey } from './view/shot-controls';
 import type { MediaItem } from './types';
 
-/** Audio-only formats the sound view accepts on top of every video format. */
+/** Audio-only formats the sound half accepts on top of every video format. */
 const SOUND_ONLY_EXTENSIONS = [
 	'mp3',
 	'wav',
@@ -42,6 +46,7 @@ export default class CinemaCanvasPlugin extends Plugin {
 	thumbnails!: ThumbnailStore;
 	shots!: ShotIndex;
 	sound!: SoundIndex;
+	scenes!: SceneStore;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -69,6 +74,9 @@ export default class CinemaCanvasPlugin extends Plugin {
 		});
 		this.addChild(this.sound);
 
+		this.scenes = new SceneStore(this.app);
+		this.addChild(this.scenes);
+
 		this.registerView(
 			VIEW_TYPE_CINEMA_CANVAS,
 			(leaf) => new CinemaCanvasView(leaf, this),
@@ -79,16 +87,19 @@ export default class CinemaCanvasPlugin extends Plugin {
 			(leaf) => new CinemaClipView(leaf, this),
 		);
 
-		this.registerView(
-			VIEW_TYPE_CINEMA_SOUND,
-			(leaf) => new CinemaSoundView(leaf, this),
-		);
-
 		// A film is usually not on the canvas at all — it is one big file in a
-		// folder of its own — so the sound view is offered wherever a file is.
+		// folder of its own — so both halves are offered wherever a file is.
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
-				if (!(file instanceof TFile) || !this.isSoundFile(file)) return;
+				if (!(file instanceof TFile)) return;
+				if (this.isVideoFile(file))
+					menu.addItem((entry) =>
+						entry
+							.setTitle('Open in cut view')
+							.setIcon('film')
+							.onClick(() => void this.openClip(file)),
+					);
+				if (!this.isSoundFile(file)) return;
 				menu.addItem((entry) =>
 					entry
 						.setTitle('Open in sound view')
@@ -96,6 +107,22 @@ export default class CinemaCanvasPlugin extends Plugin {
 						.onClick(() => void this.openSound(file)),
 				);
 			}),
+		);
+
+		// Shot lists and sound readings are keyed by path. Carrying them across
+		// a rename is what keeps moving a film from costing another half hour.
+		// Scene notes follow their film on their own; see SceneStore.
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (!(file instanceof TFile)) return;
+				if (this.isVideoFile(file))
+					void this.shots.rename(oldPath, this.itemForFile(file));
+				if (this.isSoundFile(file)) void this.sound.rename(file, oldPath);
+			}),
+		);
+
+		this.registerMarkdownCodeBlockProcessor(BLOCK_LANGUAGE, (source, el, ctx) =>
+			renderSceneBlock(this, source, el, ctx.sourcePath),
 		);
 
 		this.addRibbonIcon('clapperboard', 'Open cinema canvas', () => {
@@ -143,24 +170,65 @@ export default class CinemaCanvasPlugin extends Plugin {
 	}
 
 	/**
-	 * Opens one clip in its own tab, with every segment laid out.
+	 * Opens a film in the cut view, showing one of its scenes if asked.
 	 *
-	 * A clip already open is revealed rather than opened twice — the view holds
-	 * a playhead and a selected segment, and duplicating a tab would silently
-	 * throw those away.
+	 * Any video in the vault will do, on the canvas or not. One film is one
+	 * tab: a film already open is revealed and told which scene to show, rather
+	 * than opened again. A second tab would throw away the playhead and the
+	 * selection in the first, and a tab per scene would bury the film under its
+	 * own parts.
+	 *
+	 * @param scene the scene's id, from its note.
 	 */
-	async openClip(item: MediaItem): Promise<void> {
-		if (item.kind !== 'video') {
-			new Notice('Cinema canvas: segments only exist for video.');
+	async openClip(file: TFile, scene?: string): Promise<void> {
+		if (!this.isVideoFile(file)) {
+			new Notice('Cinema canvas: cuts only exist for video.');
 			return;
 		}
+		await this.reveal(
+			file,
+			scene === undefined ? { half: 'cuts' } : { half: 'cuts', scene },
+		);
+	}
+
+	/**
+	 * Opens the soundtrack of one file: the sound half of the same tab.
+	 *
+	 * The cuts and the sound are two questions about one file at one moment, so
+	 * they share a tab, a player and a playhead, with a switch in the header.
+	 * Any audio or video file will do, on the canvas or not — a file with no
+	 * picture simply has no cuts half.
+	 */
+	async openSound(file: TFile): Promise<void> {
+		if (!this.isSoundFile(file)) {
+			new Notice('Cinema canvas: the sound half needs an audio or video file.');
+			return;
+		}
+		await this.reveal(file, { half: 'sound' });
+	}
+
+	/**
+	 * One file, one tab. A file already open is revealed and told which half,
+	 * and which scene, to show — rather than opened again. A second tab would
+	 * throw away the playhead and the selection in the first.
+	 */
+	private async reveal(
+		file: TFile,
+		extra: Record<string, unknown>,
+	): Promise<void> {
 		const { workspace } = this.app;
 		for (const leaf of workspace.getLeavesOfType(VIEW_TYPE_CINEMA_CLIP)) {
 			// The leaf's view state, not the view: since 1.7 a background leaf
 			// holds a deferred placeholder until it is revealed, so asking the
 			// view would miss every tab the user has not looked at yet.
 			const state = leaf.getViewState().state;
-			if (state?.path !== item.path) continue;
+			if (state?.path !== file.path) continue;
+			if (Object.entries(extra).some(([key, value]) => state[key] !== value))
+				await leaf.setViewState({
+					type: VIEW_TYPE_CINEMA_CLIP,
+					active: true,
+					state: { ...state, ...extra },
+				});
 			await workspace.revealLeaf(leaf);
 			return;
 		}
@@ -168,43 +236,23 @@ export default class CinemaCanvasPlugin extends Plugin {
 		await leaf.setViewState({
 			type: VIEW_TYPE_CINEMA_CLIP,
 			active: true,
-			state: { path: item.path },
-		});
-		await workspace.revealLeaf(leaf);
-	}
-
-	/**
-	 * Opens the soundtrack of one file in its own tab.
-	 *
-	 * Like `openClip`, a file already open is revealed rather than opened
-	 * twice; like the file menu, any audio or video file will do, on the
-	 * canvas or not.
-	 */
-	async openSound(file: TFile): Promise<void> {
-		if (!this.isSoundFile(file)) {
-			new Notice('Cinema canvas: the sound view needs an audio or video file.');
-			return;
-		}
-		const { workspace } = this.app;
-		for (const leaf of workspace.getLeavesOfType(VIEW_TYPE_CINEMA_SOUND)) {
-			if (leaf.getViewState().state?.path !== file.path) continue;
-			await workspace.revealLeaf(leaf);
-			return;
-		}
-		const leaf = workspace.getLeaf('tab');
-		await leaf.setViewState({
-			type: VIEW_TYPE_CINEMA_SOUND,
-			active: true,
-			state: { path: file.path },
+			state: { path: file.path, ...extra },
 		});
 		await workspace.revealLeaf(leaf);
 	}
 
 	/** Anything ffmpeg can pull an audio track out of, as far as the name says. */
 	isSoundFile(file: TFile): boolean {
+		return (
+			SOUND_ONLY_EXTENSIONS.includes(file.extension.toLowerCase()) ||
+			this.isVideoFile(file)
+		);
+	}
+
+	/** Anything the cut view can open, whether or not the canvas indexes it. */
+	isVideoFile(file: TFile): boolean {
 		const extension = file.extension.toLowerCase();
 		return (
-			SOUND_ONLY_EXTENSIONS.includes(extension) ||
 			DEFAULT_VIDEO_EXTENSIONS.includes(extension) ||
 			parseExtensionList(this.settings.extraVideoExtensions).includes(
 				extension,
@@ -212,7 +260,25 @@ export default class CinemaCanvasPlugin extends Plugin {
 		);
 	}
 
-	/** Applies one sound threshold from the sound view; see `setShotParam`. */
+	/**
+	 * The media item for a video: the canvas's own when it is indexed, or one
+	 * made on the spot for a film outside the canvas folders.
+	 */
+	itemForFile(file: TFile): MediaItem {
+		const indexed = this.index.getItem(file.path);
+		if (indexed) return indexed;
+		const parent = file.parent?.path ?? '';
+		return {
+			key: file.path,
+			path: file.path,
+			file,
+			kind: 'video',
+			folder: parent === '/' ? '' : parent,
+			version: file.stat.mtime,
+		};
+	}
+
+	/** Applies one sound threshold from the sound half; see `setShotParam`. */
 	setSoundParam(key: SoundParamKey, value: number): void {
 		if (this.settings[key] === value) return;
 		this.settings[key] = value;
@@ -235,6 +301,53 @@ export default class CinemaCanvasPlugin extends Plugin {
 		this.saveShotParams();
 	}
 
+	/**
+	 * Adds a tag to the list every film's scenes half offers.
+	 *
+	 * @returns the tag as it is now listed: an existing tag differing only in
+	 * case is kept as it was first written.
+	 */
+	async addSceneTag(tag: string): Promise<string | null> {
+		const text = tag.trim();
+		if (!text) return null;
+		const existing = this.settings.sceneTags.find((t) => tagKey(t) === tagKey(text));
+		if (existing) return existing;
+		this.settings.sceneTags = [...this.settings.sceneTags, text];
+		await this.saveTags();
+		return text;
+	}
+
+	/**
+	 * Takes a tag off the list. Scenes carrying it are the film's business:
+	 * the view that asked strips its own film's scenes.
+	 */
+	async removeSceneTag(tag: string): Promise<void> {
+		const key = tagKey(tag);
+		const kept = this.settings.sceneTags.filter((t) => tagKey(t) !== key);
+		if (kept.length === this.settings.sceneTags.length) return;
+		this.settings.sceneTags = kept;
+		await this.saveTags();
+	}
+
+	/** Moves a tag to `index` in the list. */
+	async moveSceneTag(tag: string, index: number): Promise<void> {
+		const key = tagKey(tag);
+		const from = this.settings.sceneTags.findIndex((t) => tagKey(t) === key);
+		if (from < 0) return;
+		const tags = [...this.settings.sceneTags];
+		const [moved] = tags.splice(from, 1);
+		if (moved === undefined) return;
+		tags.splice(Math.min(Math.max(index, 0), tags.length), 0, moved);
+		this.settings.sceneTags = tags;
+		await this.saveTags();
+	}
+
+	private async saveTags(): Promise<void> {
+		await this.saveData(this.settings);
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CINEMA_CLIP))
+			if (leaf.view instanceof CinemaClipView) leaf.view.render();
+	}
+
 	private readonly saveShotParams = debounce(() => {
 		void this.saveData(this.settings);
 	}, 500);
@@ -245,6 +358,11 @@ export default class CinemaCanvasPlugin extends Plugin {
 			DEFAULT_SETTINGS,
 			(await this.loadData()) as Partial<CinemaCanvasSettings>,
 		);
+		// data.json is hand-editable; a tag list that is not one is replaced.
+		const tags: unknown = this.settings.sceneTags;
+		this.settings.sceneTags = Array.isArray(tags)
+			? tags.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+			: [...DEFAULT_SETTINGS.sceneTags];
 	}
 
 	/**
@@ -308,20 +426,26 @@ export default class CinemaCanvasPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: 'clear-thumbnail-cache',
-			name: 'Clear thumbnail cache',
-			callback: () => {
-				void this.thumbnails.clear().then(() => {
-					for (const view of this.canvasViews()) view.refreshSettings();
-					new Notice('Cinema canvas: thumbnail cache cleared');
-				});
-			},
+			id: 'clear-caches',
+			name: 'Clear cached data',
+			callback: () => this.promptClear(),
 		});
 
 		this.addCommand({
 			id: 'detect-shots',
 			name: 'Detect shots in all clips',
 			callback: () => void this.detectShots(),
+		});
+
+		this.addCommand({
+			id: 'open-clip-active-file',
+			name: 'Open current file in the cut view',
+			checkCallback: (checking: boolean) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || !this.isVideoFile(file)) return false;
+				if (!checking) void this.openClip(file);
+				return true;
+			},
 		});
 
 		this.addCommand({
@@ -332,26 +456,6 @@ export default class CinemaCanvasPlugin extends Plugin {
 				if (!file || !this.isSoundFile(file)) return false;
 				if (!checking) void this.openSound(file);
 				return true;
-			},
-		});
-
-		this.addCommand({
-			id: 'clear-sound-cache',
-			name: 'Clear sound analysis',
-			callback: () => {
-				void this.sound.clear().then(() => {
-					new Notice('Cinema canvas: sound analysis cleared');
-				});
-			},
-		});
-
-		this.addCommand({
-			id: 'clear-shot-cache',
-			name: 'Clear detected shots',
-			callback: () => {
-				void this.shots.clear().then(() => {
-					new Notice('Cinema canvas: detected shots cleared');
-				});
 			},
 		});
 
@@ -372,9 +476,9 @@ export default class CinemaCanvasPlugin extends Plugin {
 			});
 		};
 
-		viewCommand('open-clip', 'Open selected clip in the segment view', (v) => {
+		viewCommand('open-clip', 'Open selected clip in the cut view', (v) => {
 			const selected = v.selectedItem();
-			if (selected) void this.openClip(selected);
+			if (selected) void this.openClip(selected.file);
 		});
 
 		viewCommand('open-sound', 'Open selected clip in the sound view', (v) => {
@@ -405,6 +509,62 @@ export default class CinemaCanvasPlugin extends Plugin {
 	}
 
 	/**
+	 * Asks which cache to clear, and clears it.
+	 *
+	 * Everything here is derived from files that are still in the vault, so
+	 * none of it is lost for good. What differs is the price of making it
+	 * again, which is why each choice says what that price is, and why
+	 * clearing all three has to be chosen rather than assumed.
+	 */
+	private promptClear(): void {
+		const targets: ClearTarget[] = [
+			{
+				label: 'Thumbnails',
+				hint: 'stills for the canvas and the cut cards; made again as you look at them',
+				run: async () => {
+					await this.thumbnails.clear();
+					for (const view of this.canvasViews()) view.refreshSettings();
+				},
+			},
+			{
+				label: 'Detected shots',
+				hint: `cut lists from ${DETECTOR_LABEL}; about 27 minutes again per two-hour film`,
+				run: () => this.shots.clear(),
+			},
+			{
+				label: 'Sound analysis',
+				hint: 'dialogue, music, effects and loudness; about 5 seconds again per minute of audio',
+				run: () => this.sound.clear(),
+			},
+		];
+		const everything: ClearTarget = {
+			label: 'Everything',
+			hint: 'all three of the below',
+			// In order, not at once: three cache folders being rewritten in
+			// parallel is the one way to make this slower than it has to be.
+			run: async () => {
+				for (const target of targets) await target.run();
+			},
+		};
+
+		new CachePickerModal(this.app, [everything, ...targets], (picked) => {
+			void picked
+				.run()
+				.then(() =>
+					new Notice(
+						`Cinema canvas: cleared ${picked.label.toLowerCase()}.`,
+					),
+				)
+				.catch((err: unknown) =>
+					new Notice(
+						`Cinema canvas: ${picked.label.toLowerCase()} could not be cleared. ${err instanceof Error ? err.message : String(err)}`,
+						12000,
+					),
+				);
+		}).open();
+	}
+
+	/**
 	 * Re-detects the one clip under the cursor, at the current threshold.
 	 *
 	 * This is the tuning loop: change the sensitivity, re-run it here, look at
@@ -430,6 +590,7 @@ export default class CinemaCanvasPlugin extends Plugin {
 		);
 		const shots = await this.shots.detect(selected, true);
 		if (!shots) {
+			if (this.shots.wasCancelled(selected)) return;
 			const reason = this.shots.errorFor(selected);
 			new Notice(
 				reason

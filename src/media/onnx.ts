@@ -6,6 +6,8 @@
  * is opened once per session.
  */
 
+import { runtimeRoot } from './ort-runtime';
+
 // --- the slice of onnxruntime-node this plugin uses -----------------------
 // Declared structurally rather than imported, so the plugin still type-checks
 // and builds on a machine that has never installed the runtime.
@@ -53,8 +55,8 @@ let ortModule: OrtModule | null = null;
 declare const require: ((id: string) => unknown) | undefined;
 
 /**
- * Loads onnxruntime-node out of the plugin's own `node_modules`, by absolute
- * path.
+ * Loads onnxruntime-node from where `installRuntime` unpacked it, by
+ * absolute path.
  *
  * The path is the whole point. Obsidian evaluates `main.js` in the renderer,
  * so the `require` in scope is Electron's, and its resolution paths are rooted
@@ -64,8 +66,8 @@ declare const require: ((id: string) => unknown) | undefined;
  * `import()` is worse still: esbuild leaves it as a real ESM import, which the
  * renderer resolves against the page URL.)
  *
- * The bare name is still tried afterwards, for the case where the package has
- * been hoisted somewhere Obsidian can see.
+ * The plugin's own `node_modules` and the bare name are still tried
+ * afterwards, for a development checkout that ran `npm install`.
  */
 export function loadOrt(runtimeDir: string): OrtModule {
 	if (ortModule) return ortModule;
@@ -78,6 +80,7 @@ export function loadOrt(runtimeDir: string): OrtModule {
 			'Node require is unavailable in this Obsidian build, so onnxruntime-node cannot be loaded.',
 		);
 	const candidates = [
+		`${runtimeRoot(runtimeDir)}/node_modules/onnxruntime-node`,
 		`${runtimeDir.replace(/\\/g, '/')}/node_modules/onnxruntime-node`,
 		'onnxruntime-node',
 	];
@@ -92,7 +95,7 @@ export function loadOrt(runtimeDir: string): OrtModule {
 		}
 	}
 	throw new Error(
-		`onnxruntime-node could not be loaded. Run \`npm install\` in the plugin folder. (${failures.join(' | ')})`,
+		`onnxruntime-node could not be loaded. Download it in settings, under Shot detection. (${failures.join(' | ')})`,
 	);
 }
 

@@ -83,7 +83,7 @@ export interface ShotStripOptions {
 	onOpenShot: (item: MediaItem, shot: Shot) => void;
 	/** Open the clip in its own tab, with every segment laid out. */
 	onOpenClip: (item: MediaItem) => void;
-	/** Open the clip's soundtrack in its own tab. */
+	/** Open the clip's own tab, turned to its sound half. */
 	onOpenSound: (item: MediaItem) => void;
 	/** Play the canvas cell from `time` to the end of the file. */
 	onSeek: (item: MediaItem, time: number, duration: number) => void;
@@ -100,9 +100,9 @@ export interface ShotStripOptions {
  * The sticky strip along the bottom of the canvas.
  *
  * Two tabs over one body, both about whichever clip is selected: **Cuts**, one
- * cell per shot, and **Sound**, the four lanes of the sound view drawn an inch
+ * cell per shot, and **Sound**, the four lanes of the sound half drawn an inch
  * high. Each side offers the one button that starts its own analysis when it
- * has not run, and a button that opens the same thing in a tab of its own when
+ * has not run, and a button that opens the same thing in the file's own tab when
  * the strip is too small for what you are looking at.
  *
  * The canvas above stays one cell per file — the strip is the only place a clip
@@ -420,6 +420,9 @@ export class ShotStrip {
 
 		if (pending) {
 			this.actionEl.createDiv({ cls: 'cine-strip-spinner' });
+			this.renderOpenButton('square', 'Stop finding cuts', () =>
+				this.shots.cancel(item),
+			);
 			this.renderOpenButton(
 				'gallery-vertical-end',
 				'Open this clip in its own tab, with every segment laid out',
@@ -658,7 +661,7 @@ export class ShotStrip {
 
 		this.renderOpenButton(
 			'audio-waveform',
-			'Open this clip in the sound view: lanes across the whole running time, plus music cues and silences',
+			"Open this clip's own tab, on its sound half: lanes across the whole running time, plus music cues and silences",
 			() => this.options.onOpenSound(item),
 		);
 
@@ -995,7 +998,7 @@ export class ShotStrip {
 		}
 		this.render();
 		const shots = await this.shots.detect(item, force);
-		if (!shots) {
+		if (!shots && !this.shots.wasCancelled(item)) {
 			const reason = this.shots.errorFor(item);
 			new Notice(
 				reason

@@ -125,7 +125,7 @@ export class CinemaCanvasView extends ItemView {
 			{
 				onPlayShot: (item, shot) => this.playShot(item, shot),
 				onOpenShot: (item, shot) => this.openShot(item, shot),
-				onOpenClip: (item) => void this.plugin.openClip(item),
+				onOpenClip: (item) => void this.plugin.openClip(item.file),
 				onOpenSound: (item) => void this.plugin.openSound(item.file),
 				onSeek: (item, time, duration) =>
 					this.playShot(item, {
@@ -154,6 +154,17 @@ export class CinemaCanvasView extends ItemView {
 			this.onDoubleClick(e),
 		);
 		this.registerDomEvent(root, 'keydown', (e) => this.onKeyDown(e));
+
+		// Leaving the tab stops the cell that is playing, and pauses the
+		// lightbox if it is open. A clip going on under another tab is never
+		// what you meant, and a cell that plays holds a decoder open.
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', (leaf) => {
+				if (leaf === this.leaf) return;
+				this.stopPlayback();
+				this.lightbox.pauseForNow();
+			}),
+		);
 
 		this.resizeObserver = new ResizeObserver(() => {
 			if (!this.hasFitOnce) this.fitAll(false);
@@ -467,10 +478,16 @@ export class CinemaCanvasView extends ItemView {
 	private onClick(e: MouseEvent): void {
 		const group = this.groupFromEvent(e);
 		if (group) {
+			this.stopPlayback();
 			this.viewport.zoomToRect(group, 0.05);
 			return;
 		}
 		const box = this.boxFromEvent(e);
+		// Anywhere but the cell that is playing stops it: the background, a
+		// folder header, or another cell — a still image as readily as a clip.
+		// Only the playing cell itself is left alone, because clicking that one
+		// is how you pause it, just below.
+		if (!box || this.playingCell?.key !== box.item.key) this.stopPlayback();
 		if (!box) return;
 		this.select(box.index, false);
 		// Clicking a clip swaps its still for real playback, and back again.

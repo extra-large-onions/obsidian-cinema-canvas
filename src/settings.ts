@@ -48,7 +48,7 @@ export interface CinemaCanvasSettings {
 	minShotLength: number;
 
 	/**
-	 * RMS level under which the sound view calls a moment silent, dBFS.
+	 * RMS level under which the sound half calls a moment silent, dBFS.
 	 *
 	 * Default -50. A film is almost never digitally silent — its quiet is room
 	 * tone — so 0-referenced "silence" would find none at all.
@@ -61,6 +61,15 @@ export interface CinemaCanvasSettings {
 	 * piano scored 78-86 and speech alone at most 5.
 	 */
 	soundMusic: number;
+
+	/**
+	 * The tags scenes are filed under, in the order the scenes half lists them.
+	 *
+	 * One list for every film, because shot grammar is not particular to a
+	 * film: a two shot is a two shot everywhere. Which scene carries which tag
+	 * is the film's own business and lives in its note.
+	 */
+	sceneTags: string[];
 }
 
 export const DEFAULT_SETTINGS: CinemaCanvasSettings = {
@@ -94,6 +103,19 @@ export const DEFAULT_SETTINGS: CinemaCanvasSettings = {
 	soundSilenceDb: -50,
 	soundDialogue: 50,
 	soundMusic: 30,
+
+	sceneTags: [
+		'Over the shoulder',
+		'Shot / counter shot',
+		'Two shot',
+		'Ensemble',
+		'Single',
+		'Action',
+		'Rapid cuts',
+		'Long take',
+		'Dialogue',
+		'Insert',
+	],
 };
 
 const HEIGHT_PRESETS: Record<string, string> = {
@@ -307,14 +329,14 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Shot detection')
 			.setDesc(
-				'Select a clip on the canvas and press Find cuts in the strip along the bottom. The sliders that shape the cutting live in that strip too, next to the shots they change. Nothing is written to the vault and the clip is never split on disk — a shot is only a start and end time against the original file.',
+				'Select a clip on the canvas and press Find cuts in the strip along the bottom, or right-click any video and choose Open in cut view. The sliders that shape the cutting live next to the cuts they change. A clip is never split on disk: a cut is only a time. Cut lists and sound readings are cached in _cache/cinema-canvas/ inside the vault, and scenes and labels are saved in a note beside each film.',
 			)
 			.setHeading();
 
 		new Setting(containerEl)
 			.setName('ffmpeg path')
 			.setDesc(
-				'Used to decode frames for shot detection and audio for the sound view. Leave empty to use whatever is on PATH. Use the check button to confirm it runs.',
+				'Used to decode frames for shot detection and audio for the sound analysis. Leave empty to use whatever is on PATH. Use the check button to confirm it runs.',
 			)
 			.addText((t) =>
 				t
@@ -339,7 +361,7 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('TransNetV2 model')
 			.setDesc(
-				'Cuts are found by a trained network, which needs a 31 MB model file downloaded once into the plugin folder. Leave the path empty to use that copy.',
+				'Cuts are found by a trained network. Download fetches it (31 MB) and the ONNX runtime that runs it (112 MB) once into the plugin folder. Leave the path empty to use that copy of the model.',
 			)
 			.addText((t) =>
 				t

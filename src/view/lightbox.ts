@@ -117,6 +117,17 @@ export class Lightbox {
 		this.options.onClose();
 	}
 
+	/**
+	 * Pauses what is playing and keeps the overlay open on the same frame.
+	 *
+	 * Used when the tab is left: closing the viewer would lose the place, and
+	 * `clearStage` would throw the element away.
+	 */
+	pauseForNow(): void {
+		const video = this.stage.querySelector('video');
+		if (video instanceof HTMLVideoElement && !video.paused) video.pause();
+	}
+
 	step(delta: number): void {
 		if (!this.open || this.items.length === 0) return;
 		const count = this.items.length;

@@ -1,12 +1,4 @@
-import {
-	ItemView,
-	Notice,
-	TAbstractFile,
-	TFile,
-	WorkspaceLeaf,
-	setIcon,
-	setTooltip,
-} from 'obsidian';
+import { Notice, TFile, setTooltip } from 'obsidian';
 import type CinemaCanvasPlugin from '../main';
 import {
 	ANALYSIS_SECONDS_PER_SECOND,
@@ -40,8 +32,6 @@ import {
 	megabytes,
 	rowsHeight,
 } from './sound-lanes';
-
-export const VIEW_TYPE_CINEMA_SOUND = 'cinema-sound';
 
 const PARAMS: readonly RangeSpec<SoundParamKey>[] = [
 	{
@@ -85,7 +75,6 @@ const LIST_MIN_QUIET = 30;
 const LIST_MAX_ROWS = 400;
 
 type PanelKind =
-	| 'missing'
 	| 'loading'
 	| 'models'
 	| 'downloading'
@@ -94,46 +83,57 @@ type PanelKind =
 	| 'error'
 	| 'none';
 
+/** The one big button this half is offering, if any. */
+export interface SoundCta {
+	label: string;
+	tooltip: string;
+	run: () => void;
+}
+
+export interface SoundPaneHost {
+	plugin: CinemaCanvasPlugin;
+	/** The player the whole tab shares, or null before it exists. */
+	video: () => HTMLVideoElement | null;
+	/** Asks the tab to render again, header and all. */
+	refresh: () => void;
+}
+
 /**
- * A whole tab given over to the soundtrack of one file.
+ * The sound half of a film's tab: lanes, lists, and the run that fills them.
  *
- * The cut views ask where the picture changes; this one asks what you are
- * hearing, which is the other half of how a scene is built — where the score
- * comes in, how long a scene goes without a line, where the mix drops out
- * entirely. It is meant for whole films: every lane is drawn to scale across
- * the full running time, and a second, zoomable set of lanes follows the
- * playhead for the detail.
+ * The cuts ask where the picture changes; this asks what you are hearing, which
+ * is the other half of how a scene is built — where the score comes in, how long
+ * a scene goes without a line, where the mix drops out entirely.
+ *
+ * It is a pane rather than a view of its own because both questions are about
+ * the same file at the same moment: one tab, one player, one playhead, and a
+ * switch. It owns the timeline and the lists, and nothing above them — the
+ * player, the header and the summary belong to the tab.
  */
-export class CinemaSoundView extends ItemView {
+export class SoundPane {
+	private readonly host: SoundPaneHost;
 	private readonly plugin: CinemaCanvasPlugin;
 
-	private summaryEl!: HTMLElement;
-	private actionEl!: HTMLElement;
-	private stageEl!: HTMLElement;
-	private timelineEl!: HTMLElement;
-	private overviewCanvas!: HTMLCanvasElement;
-	private detailCanvas!: HTMLCanvasElement;
-	private readoutEl!: HTMLElement;
-	private bodyEl!: HTMLElement;
-	private panelEl!: HTMLElement;
-	private listsEl!: HTMLElement;
-	private video: HTMLVideoElement | null = null;
+	private readonly timelineEl: HTMLElement;
+	private readonly bodyEl: HTMLElement;
+	private readonly overviewCanvas: HTMLCanvasElement;
+	private readonly detailCanvas: HTMLCanvasElement;
+	private readonly readoutEl: HTMLElement;
+	private readonly panelEl: HTMLElement;
+	private readonly listsEl: HTMLElement;
 
-	private path: string | null = null;
 	private file: TFile | null = null;
 	private lanes: SoundLanes | null = null;
 	private lanesKey = '';
 	private listsKey = '';
-	private actionsKey = '';
 	private panel: { kind: PanelKind; update: () => void } | null = null;
 
 	/** Pre-rendered overview lanes; only the playhead is drawn per frame. */
 	private overviewBitmap: HTMLCanvasElement | null = null;
 	private overviewKey = '';
-	private colors!: { get: ColorResolver; clear: () => void };
+	private readonly colors: { get: ColorResolver; clear: () => void };
 	private zoom = ZOOM_DEFAULT;
-	private hover: { canvas: 'overview' | 'detail'; time: number } | null =
-		null;
+	private hover: { canvas: 'overview' | 'detail'; time: number } | null = null;
 
 	/** Null until checked; re-checked whenever a download finishes. */
 	private modelsReady: boolean | null = null;
@@ -143,87 +143,40 @@ export class CinemaSoundView extends ItemView {
 	private readonly cacheChecked = new Set<string>();
 	private runStartedAt = 0;
 
-	private unsubscribe: (() => void) | null = null;
-	private frame: number | null = null;
-	private playFrame: number | null = null;
+	private resizeObserver: ResizeObserver | null = null;
 	/** Its own frame, so a retry never swallows a pending render. */
 	private drawFrame: number | null = null;
 	private drawRetries = 0;
-	private resizeObserver: ResizeObserver | null = null;
 	private adjusting = false;
 
 	private readonly paramHost: RangeHost<SoundParamKey>;
 
-	constructor(leaf: WorkspaceLeaf, plugin: CinemaCanvasPlugin) {
-		super(leaf);
-		this.plugin = plugin;
-		this.navigation = true;
-		this.paramHost = {
-			setParam: (key, value) => this.plugin.setSoundParam(key, value),
-			hold: () => {
-				this.adjusting = true;
-			},
-			release: () => {
-				if (!this.adjusting) return;
-				this.adjusting = false;
-				this.render();
-			},
-		};
-	}
+	/**
+	 * @param timelineEl and `bodyEl` are made by the tab, in its own order, and
+	 * filled in here. The pane never decides where in the tab it sits.
+	 */
+	constructor(
+		timelineEl: HTMLElement,
+		bodyEl: HTMLElement,
+		host: SoundPaneHost,
+	) {
+		this.host = host;
+		this.plugin = host.plugin;
 
-	getViewType(): string {
-		return VIEW_TYPE_CINEMA_SOUND;
-	}
-
-	getDisplayText(): string {
-		return this.file ? `${this.file.name} · sound` : 'Sound';
-	}
-
-	override getIcon(): string {
-		return 'audio-waveform';
-	}
-
-	// --- lifecycle --------------------------------------------------------
-
-	override async onOpen(): Promise<void> {
-		const root = this.contentEl;
-		root.empty();
-		root.addClass('cine-clip-view', 'cine-sound-view');
-		root.tabIndex = 0;
-		this.colors = createColorCache(root);
-
-		const header = root.createDiv({ cls: 'cine-clip-header' });
-		this.summaryEl = header.createDiv({ cls: 'cine-clip-summary' });
-		this.actionEl = header.createDiv({ cls: 'cine-clip-actions' });
-
-		this.stageEl = root.createDiv({ cls: 'cine-clip-stage cine-sound-stage' });
-
-		this.timelineEl = root.createDiv({ cls: 'cine-sound-timeline' });
-		this.overviewCanvas = this.buildLanes(
-			this.timelineEl,
-			'overview',
-			OVERVIEW_ROWS,
-		);
-		this.detailCanvas = this.buildLanes(
-			this.timelineEl,
-			'detail',
-			DETAIL_ROWS,
-		);
+		this.timelineEl = timelineEl;
+		this.timelineEl.addClass('cine-sound-timeline');
+		this.overviewCanvas = this.buildLanes('overview', OVERVIEW_ROWS);
+		this.detailCanvas = this.buildLanes('detail', DETAIL_ROWS);
 		this.readoutEl = this.timelineEl.createDiv({ cls: 'cine-sound-readout' });
 
-		this.bodyEl = root.createDiv({ cls: 'cine-clip-body cine-sound-body' });
+		this.bodyEl = bodyEl;
+		this.bodyEl.addClass('cine-clip-body', 'cine-sound-body');
 		this.panelEl = this.bodyEl.createDiv({ cls: 'cine-sound-panel' });
 		this.listsEl = this.bodyEl.createDiv({ cls: 'cine-sound-lists' });
 
-		this.registerDomEvent(root, 'keydown', (e) => this.onKeyDown(e));
-		this.registerDomEvent(this.detailCanvas, 'wheel', (e) => this.onWheel(e), {
+		this.colors = createColorCache(this.timelineEl);
+		this.detailCanvas.addEventListener('wheel', (e) => this.onWheel(e), {
 			passive: false,
-		});
-		// Full screen changes the width of the lanes without resizing the leaf,
-		// and the observer below can miss the transition either way.
-		this.registerDomEvent(root, 'fullscreenchange', () => {
-			this.sizeCanvases();
-			this.draw();
 		});
 
 		this.resizeObserver = new ResizeObserver(() => {
@@ -232,135 +185,142 @@ export class CinemaSoundView extends ItemView {
 		});
 		this.resizeObserver.observe(this.timelineEl);
 
-		this.unsubscribe = this.plugin.sound.onChange(() => this.scheduleRender());
-		this.registerEvent(
-			this.app.workspace.on('css-change', () => {
-				this.colors.clear();
-				this.overviewBitmap = null;
-				this.overviewKey = '';
-				this.draw();
-			}),
-		);
-		this.registerEvent(
-			this.app.vault.on('rename', (file, oldPath) =>
-				this.onRename(file, oldPath),
-			),
-		);
-		this.registerEvent(
-			this.app.vault.on('modify', (file) => {
-				if (file.path === this.path) this.scheduleRender();
-			}),
-		);
-		this.registerEvent(
-			this.app.vault.on('delete', (file) => {
-				if (file.path === this.path) this.scheduleRender();
-			}),
-		);
-		// The first render can land while this leaf is still hidden: the tab is
-		// revealed after `onOpen` returns, and a cached analysis needs no time
-		// at all, so everything happens in that one tick. Becoming the active
-		// leaf, and the layout settling, both have to draw again.
-		this.registerEvent(
-			this.app.workspace.on('active-leaf-change', (leaf) => {
-				if (leaf !== this.leaf) return;
-				this.drawRetries = 0;
-				this.draw();
-			}),
-		);
-		this.app.workspace.onLayoutReady(() => {
-			this.drawRetries = 0;
-			this.draw();
-		});
-
-		this.render();
+		this.paramHost = {
+			setParam: (key, value) => this.plugin.setSoundParam(key, value),
+			hold: () => {
+				this.adjusting = true;
+			},
+			release: () => {
+				if (!this.adjusting) return;
+				this.adjusting = false;
+				this.host.refresh();
+			},
+		};
 	}
 
-	override async onClose(): Promise<void> {
-		this.unsubscribe?.();
-		this.unsubscribe = null;
+	destroy(): void {
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
-		if (this.frame !== null) window.cancelAnimationFrame(this.frame);
-		this.frame = null;
 		if (this.drawFrame !== null) window.cancelAnimationFrame(this.drawFrame);
 		this.drawFrame = null;
-		this.stopPlayLoop();
-		this.dropVideo();
 	}
 
-	override getState(): Record<string, unknown> {
-		return { path: this.path ?? undefined };
-	}
-
-	override async setState(
-		state: unknown,
-		result: { history: boolean },
-	): Promise<void> {
-		const path =
-			typeof state === 'object' && state !== null
-				? (state as { path?: unknown }).path
-				: undefined;
-		if (typeof path === 'string' && path !== this.path) {
-			this.path = path;
-			this.file = null;
-			this.resetForFile();
-			this.render();
-		}
-		await super.setState(state, result);
-	}
-
-	private onRename(file: TAbstractFile, oldPath: string): void {
-		if (oldPath !== this.path) return;
-		// The readings are keyed by path, so a renamed film is a new analysis;
-		// the view follows the file rather than showing a missing one.
-		this.path = file.path;
-		this.file = null;
-		this.resetForFile();
-		this.render();
-	}
-
-	private resetForFile(): void {
+	/** Points the pane at a file, or at nothing. */
+	setFile(file: TFile | null): void {
+		if (file?.path === this.file?.path) return;
+		this.file = file;
 		this.lanes = null;
 		this.lanesKey = '';
 		this.listsKey = '';
-		this.actionsKey = '';
 		this.overviewKey = '';
 		this.panel = null;
 		this.hover = null;
-		this.dropVideo();
+		this.runStartedAt = 0;
 	}
 
-	private dropVideo(): void {
-		this.stopPlayLoop();
-		this.video?.pause();
-		this.video = null;
+	/** True once there are lanes to look at. */
+	analysed(): boolean {
+		return this.file !== null && this.plugin.sound.get(this.file) !== null;
 	}
 
-	private resolveFile(): TFile | null {
-		if (!this.path) return null;
-		const found = this.app.vault.getAbstractFileByPath(this.path);
-		this.file = found instanceof TFile ? found : null;
-		return this.file;
+	/** True while the analysis is running or waiting its turn. */
+	pending(): boolean {
+		return this.file !== null && this.plugin.sound.isPending(this.file);
+	}
+
+	/** `Heat.mkv · 1:52:04 · dialogue 34% · music 41% …` */
+	summary(): string {
+		const file = this.file;
+		if (!file) return '';
+		const sound = this.plugin.sound;
+		if (sound.isRunning(file))
+			return `${file.name} — analysing sound… ${Math.round(sound.progressFor(file) * 100)}%`;
+		const analysis = sound.get(file);
+		const lanes = this.lanes;
+		if (!analysis || !lanes) {
+			const error = sound.errorFor(file);
+			return error ? `${file.name} — ${error}` : file.name;
+		}
+		const share = (mask: Uint8Array): string =>
+			`${Math.round((laneSeconds(mask) / Math.max(analysis.duration, 1e-6)) * 100)}%`;
+		return [
+			file.name,
+			formatTimecode(analysis.duration),
+			`dialogue ${share(lanes.dialogue)}`,
+			`music ${share(lanes.music)}`,
+			`effects ${share(lanes.effects)}`,
+			`silence ${share(lanes.silence)}`,
+		].join('  ·  ');
+	}
+
+	/** The three thresholds, for the tab's header. */
+	renderParams(parent: HTMLElement): void {
+		if (!this.analysed()) return;
+		const group = parent.createDiv({ cls: 'cine-params' });
+		const settings = this.plugin.settings;
+		for (const spec of PARAMS)
+			renderRange(
+				group,
+				spec,
+				settings[spec.key],
+				this.paramHost,
+				'The lanes are re-labelled instantly; nothing is decoded again.',
+			);
+	}
+
+	/**
+	 * The one button worth making big: download the models, run the analysis, or
+	 * stop the run. Null once there are lanes and nothing is left to press.
+	 *
+	 * The tab draws it in the header, where it survives full screen — the panel
+	 * below carries the same offer, but the panel is the first thing a bigger
+	 * player pushes off the screen.
+	 */
+	cta(): SoundCta | null {
+		const file = this.file;
+		if (!file) return null;
+		const sound = this.plugin.sound;
+		if (sound.isPending(file))
+			return {
+				label: 'Stop',
+				tooltip: 'Stop the analysis. Nothing is kept.',
+				run: () => sound.cancel(file),
+			};
+		if (sound.downloading) return null;
+		if (this.modelsReady === false)
+			return {
+				label: `Download models · ${megabytes(SOUND_MODEL_BYTES)}`,
+				tooltip: `Silero VAD and PANNs CNN14, downloaded once into the plugin folder, ${megabytes(SOUND_MODEL_BYTES)} in all.`,
+				run: () => void this.download(),
+			};
+		if (this.analysed()) return null;
+		if (!this.cacheChecked.has(this.cacheId(file))) return null;
+		const failed = sound.errorFor(file);
+		return {
+			label: failed ? 'Analyse sound again' : 'Analyse sound',
+			tooltip: failed
+				? `The last run failed. ${failed}`
+				: `Read this file three ways — dialogue, music and effects, and loudness — in ${this.estimate()}. The result is cached.`,
+			run: () => void this.analyse(failed !== null),
+		};
+	}
+
+	/** Re-runs a file that already has lanes; the tab's refresh button. */
+	again(): void {
+		void this.analyse(true);
 	}
 
 	// --- rendering --------------------------------------------------------
 
-	private scheduleRender(): void {
-		if (this.frame !== null) return;
-		this.frame = window.requestAnimationFrame(() => {
-			this.frame = null;
-			this.render();
-		});
-	}
-
-	private render(): void {
-		const file = this.resolveFile();
+	render(): void {
+		const file = this.file;
 		if (!file) {
-			this.renderMissing();
+			this.timelineEl.hide();
+			this.listsEl.empty();
+			this.listsKey = '';
 			return;
 		}
 		const sound = this.plugin.sound;
-		this.ensureVideo(file);
 
 		let analysis = sound.get(file);
 		const id = this.cacheId(file);
@@ -368,12 +328,11 @@ export class CinemaSoundView extends ItemView {
 			this.cacheRequested.add(id);
 			void sound.readCached(file).then(() => {
 				this.cacheChecked.add(id);
-				this.scheduleRender();
+				this.host.refresh();
 			});
 		}
 		if (this.modelsReady === null) this.checkModels();
 
-		const running = sound.isRunning(file);
 		const pending = sound.isPending(file);
 		if (pending && this.runStartedAt === 0) this.runStartedAt = Date.now();
 		if (!pending) this.runStartedAt = 0;
@@ -382,9 +341,6 @@ export class CinemaSoundView extends ItemView {
 		else this.lanes = null;
 		analysis = this.lanes ? analysis : null;
 
-		this.renderSummary(file, analysis, running);
-		if (!this.adjusting) this.renderActions(file, analysis, pending);
-
 		this.timelineEl.toggle(analysis !== null);
 		this.renderPanel(file, analysis, pending);
 		this.renderLists(analysis);
@@ -392,130 +348,11 @@ export class CinemaSoundView extends ItemView {
 	}
 
 	/**
-	 * Obsidian's own signal that the leaf changed size.
-	 *
-	 * This is the frame a background tab is first laid out in, which is exactly
-	 * what the observer on a `display: none` timeline cannot see.
-	 */
-	override onResize(): void {
-		this.drawRetries = 0;
-		this.draw();
-	}
-
-	private renderMissing(): void {
-		this.dropVideo();
-		this.stageEl.empty();
-		this.actionEl.empty();
-		this.actionsKey = '';
-		this.timelineEl.hide();
-		this.listsEl.empty();
-		this.listsKey = '';
-		this.summaryEl.setText(
-			this.path ? `${this.path} is not in the vault.` : 'No file.',
-		);
-		this.setPanel('missing', (el) => {
-			el.createDiv({
-				cls: 'cine-clip-placeholder',
-				text: this.path
-					? 'The file may have been moved outside the vault or deleted.'
-					: 'Right-click a video or audio file and choose "Open in sound view".',
-			});
-		});
-	}
-
-	private renderSummary(
-		file: TFile,
-		analysis: SoundAnalysis | null,
-		running: boolean,
-	): void {
-		const sound = this.plugin.sound;
-		if (running) {
-			const progress = sound.progressFor(file);
-			this.summaryEl.setText(
-				`${file.name} — analysing sound… ${Math.round(progress * 100)}%`,
-			);
-			return;
-		}
-		const lanes = this.lanes;
-		if (!analysis || !lanes) {
-			const error = sound.errorFor(file);
-			this.summaryEl.setText(error ? `${file.name} — ${error}` : file.name);
-			return;
-		}
-		const share = (mask: Uint8Array): string =>
-			`${Math.round((laneSeconds(mask) / Math.max(analysis.duration, 1e-6)) * 100)}%`;
-		this.summaryEl.setText(
-			[
-				file.name,
-				formatTimecode(analysis.duration),
-				`dialogue ${share(lanes.dialogue)}`,
-				`music ${share(lanes.music)}`,
-				`effects ${share(lanes.effects)}`,
-				`silence ${share(lanes.silence)}`,
-			].join('  ·  '),
-		);
-		setTooltip(this.summaryEl, file.path, { placement: 'bottom' });
-	}
-
-	private renderActions(
-		file: TFile,
-		analysis: SoundAnalysis | null,
-		pending: boolean,
-	): void {
-		// Rebuilt only when what it offers changes: progress arrives several
-		// times a second, and a button rebuilt under the pointer loses its
-		// click.
-		const key = `${file.path}|${analysis !== null}|${pending}`;
-		if (key === this.actionsKey) return;
-		this.actionsKey = key;
-		this.actionEl.empty();
-
-		if (analysis) {
-			const group = this.actionEl.createDiv({ cls: 'cine-params' });
-			const settings = this.plugin.settings;
-			for (const spec of PARAMS)
-				renderRange(
-					group,
-					spec,
-					settings[spec.key],
-					this.paramHost,
-					'The lanes are re-labelled instantly; nothing is decoded again.',
-				);
-		}
-
-		if (pending) {
-			const stop = this.actionEl.createEl('button', {
-				cls: 'cine-strip-icon',
-			});
-			setIcon(stop, 'square');
-			setTooltip(stop, 'Stop the analysis', { placement: 'bottom' });
-			stop.addEventListener('click', () => this.plugin.sound.cancel(file));
-		} else if (analysis) {
-			const again = this.actionEl.createEl('button', {
-				cls: 'cine-strip-icon',
-			});
-			setIcon(again, 'refresh-cw');
-			setTooltip(again, 'Analyse this file again', { placement: 'bottom' });
-			again.addEventListener('click', () => void this.analyse(file, true));
-		}
-
-		const expand = this.actionEl.createEl('button', {
-			cls: 'cine-strip-icon',
-		});
-		setIcon(expand, 'expand');
-		setTooltip(
-			expand,
-			"Full screen: the player and the lanes, nothing else. The player's own full screen button shows only the picture.",
-			{ placement: 'bottom' },
-		);
-		expand.addEventListener('click', () => void this.toggleFullscreen());
-	}
-
-	/**
 	 * The state panel: everything between "no models" and "here are the lanes".
 	 *
-	 * It is rebuilt only when its kind changes and otherwise updated in place,
-	 * for the same reason as the header.
+	 * It is rebuilt only when its kind changes and otherwise updated in place, so
+	 * a progress bar arriving three times a second does not take the Stop button
+	 * out from under the pointer.
 	 */
 	private renderPanel(
 		file: TFile,
@@ -558,15 +395,8 @@ export class CinemaSoundView extends ItemView {
 				this.setPanel(kind, (el) => {
 					el.createDiv({
 						cls: 'cine-clip-placeholder',
-						text: `Sound analysis runs two networks on this machine: Silero VAD finds dialogue, and PANNs CNN14 tells music from effects. They are downloaded once into the plugin folder, ${megabytes(SOUND_MODEL_BYTES)} in all, and checked against the exact files this view was tested with.`,
+						text: `Sound analysis runs two networks on this machine: Silero VAD finds dialogue, and PANNs CNN14 tells music from effects. They are downloaded once into the plugin folder, ${megabytes(SOUND_MODEL_BYTES)} in all, and checked against the exact files this view was tested with. The button is in the header.`,
 					});
-					const button = el
-						.createDiv({ cls: 'cine-sound-cta' })
-						.createEl('button', {
-							cls: 'mod-cta',
-							text: `Download models · ${megabytes(SOUND_MODEL_BYTES)}`,
-						});
-					button.addEventListener('click', () => void this.download());
 				});
 				break;
 			case 'downloading': {
@@ -594,19 +424,10 @@ export class CinemaSoundView extends ItemView {
 			}
 			case 'ready':
 				this.setPanel(kind, (el) => {
-					const duration = this.video?.duration;
-					const estimate =
-						duration && Number.isFinite(duration)
-							? `about ${formatLength(duration * ANALYSIS_SECONDS_PER_SECOND)}`
-							: 'about 5 seconds per minute of audio';
 					el.createDiv({
 						cls: 'cine-clip-placeholder',
-						text: `This file has not been analysed yet. It is decoded once and read three ways — dialogue, music and effects, and loudness — in ${estimate}. The result is cached, and the thresholds can be changed afterwards without running it again.`,
+						text: `This file has not been analysed yet. It is decoded once and read three ways — dialogue, music and effects, and loudness — in ${this.estimate()}. The result is cached, and the thresholds can be changed afterwards without running it again. Press Analyse sound in the header.`,
 					});
-					const button = el
-						.createDiv({ cls: 'cine-sound-cta' })
-						.createEl('button', { cls: 'mod-cta', text: 'Analyse sound' });
-					button.addEventListener('click', () => void this.analyse(file, false));
 				});
 				break;
 			case 'running': {
@@ -619,10 +440,6 @@ export class CinemaSoundView extends ItemView {
 						bar = el
 							.createDiv({ cls: 'cine-sound-progress' })
 							.createDiv({ cls: 'cine-sound-progress-bar' });
-						const stop = el
-							.createDiv({ cls: 'cine-sound-cta' })
-							.createEl('button', { text: 'Stop' });
-						stop.addEventListener('click', () => sound.cancel(file));
 					},
 					() => {
 						const running = sound.isRunning(file);
@@ -648,10 +465,6 @@ export class CinemaSoundView extends ItemView {
 						cls: 'cine-clip-placeholder',
 						text: sound.errorFor(file) ?? 'The analysis failed.',
 					});
-					const button = el
-						.createDiv({ cls: 'cine-sound-cta' })
-						.createEl('button', { text: 'Try again' });
-					button.addEventListener('click', () => void this.analyse(file, true));
 				});
 				break;
 		}
@@ -666,6 +479,13 @@ export class CinemaSoundView extends ItemView {
 		build(this.panelEl);
 		this.panel = { kind, update };
 		update();
+	}
+
+	private estimate(): string {
+		const duration = this.host.video()?.duration;
+		return duration && Number.isFinite(duration)
+			? `about ${formatLength(duration * ANALYSIS_SECONDS_PER_SECOND)}`
+			: 'about 5 seconds per minute of audio';
 	}
 
 	private updateLanes(analysis: SoundAnalysis): void {
@@ -685,8 +505,8 @@ export class CinemaSoundView extends ItemView {
 	 * The lists: music cues, silences, and long stretches with no dialogue.
 	 *
 	 * These are the questions a lane answers only by squinting — how many cues,
-	 * how long the longest silence, where the film goes a minute without a
-	 * word — so they are also written out, each one a jump to that moment.
+	 * how long the longest silence, where the film goes a minute without a word —
+	 * so they are also written out, each one a jump to that moment.
 	 */
 	private renderLists(analysis: SoundAnalysis | null): void {
 		const lanes = this.lanes;
@@ -700,9 +520,7 @@ export class CinemaSoundView extends ItemView {
 		for (const lane of LANES) {
 			const seconds = laneSeconds(lanes[lane.name]);
 			const chip = stats.createDiv({ cls: 'cine-sound-stat' });
-			chip.createSpan({
-				cls: `cine-sound-swatch is-${lane.name}`,
-			});
+			chip.createSpan({ cls: `cine-sound-swatch is-${lane.name}` });
 			chip.createSpan({ cls: 'cine-sound-stat-label', text: lane.label });
 			chip.createSpan({
 				cls: 'cine-sound-stat-value',
@@ -723,9 +541,7 @@ export class CinemaSoundView extends ItemView {
 			columns,
 			`Silences over ${LIST_MIN_SILENCE}s`,
 			'silence',
-			runsOf(lanes.silence).filter(
-				(r) => r.end - r.start >= LIST_MIN_SILENCE,
-			),
+			runsOf(lanes.silence).filter((r) => r.end - r.start >= LIST_MIN_SILENCE),
 			'No silence at this threshold. Try raising it: a mix is rarely quieter than its room tone.',
 		);
 		this.renderRunList(
@@ -770,7 +586,9 @@ export class CinemaSoundView extends ItemView {
 			const meter = row.createSpan({ cls: 'cine-sound-row-meter' });
 			meter
 				.createSpan({ cls: `cine-sound-row-fill is-${lane}` })
-				.setCssStyles({ width: `${(length / Math.max(longest, 1e-6)) * 100}%` });
+				.setCssStyles({
+					width: `${(length / Math.max(longest, 1e-6)) * 100}%`,
+				});
 			row.createSpan({
 				cls: 'cine-sound-row-length',
 				text: formatLength(length),
@@ -789,84 +607,23 @@ export class CinemaSoundView extends ItemView {
 			});
 	}
 
-	// --- the player ---------------------------------------------------------
-
-	private ensureVideo(file: TFile): void {
-		if (this.video && this.video.dataset.path === file.path) return;
-		this.dropVideo();
-		this.stageEl.empty();
-		this.stageEl.removeClass('is-audio');
-		const video = this.stageEl.createEl('video', { cls: 'cine-clip-video' });
-		video.dataset.path = file.path;
-		video.src = this.app.vault.getResourcePath(file);
-		video.controls = true;
-		video.playsInline = true;
-		video.preload = 'metadata';
-		video.addEventListener('loadedmetadata', () => {
-			// An audio file plays in the same element; it just needs no room.
-			this.stageEl.toggleClass('is-audio', video.videoHeight === 0);
-			if (this.panel?.kind === 'ready') this.panel = null;
-			this.scheduleRender();
-		});
-		video.addEventListener('play', () => this.startPlayLoop());
-		video.addEventListener('pause', () => {
-			this.stopPlayLoop();
-			this.draw();
-		});
-		video.addEventListener('seeked', () => this.draw());
-		this.video = video;
-	}
-
 	private playFrom(time: number): void {
-		const video = this.video;
+		const video = this.host.video();
 		if (!video) return;
 		video.currentTime = time;
 		void video.play().catch(() => undefined);
-	}
-
-	private startPlayLoop(): void {
-		if (this.playFrame !== null) return;
-		const tick = (): void => {
-			this.draw();
-			this.playFrame = window.requestAnimationFrame(tick);
-		};
-		this.playFrame = window.requestAnimationFrame(tick);
-	}
-
-	private stopPlayLoop(): void {
-		if (this.playFrame !== null) window.cancelAnimationFrame(this.playFrame);
-		this.playFrame = null;
-	}
-
-	/**
-	 * Full screen over the whole view, not over the player.
-	 *
-	 * Fullscreening the `<video>` — which is what its own controls do — puts the
-	 * picture on top of everything else in the compositor, so nothing can be
-	 * drawn over it and the lanes simply vanish. Taking the view's own root
-	 * instead keeps the DOM intact, and the stylesheet hides the header and the
-	 * lists, leaving the player and the timeline.
-	 */
-	async toggleFullscreen(): Promise<void> {
-		const root = this.contentEl;
-		try {
-			if (activeDocument.fullscreenElement === root)
-				await activeDocument.exitFullscreen();
-			else await root.requestFullscreen();
-		} catch {
-			// Fullscreen can be refused (embedded contexts, gesture rules).
-		}
 	}
 
 	// --- the lanes ----------------------------------------------------------
 
 	/** A label column and a canvas, for one set of lanes. */
 	private buildLanes(
-		parent: HTMLElement,
 		which: 'overview' | 'detail',
 		layout: RowLayout,
 	): HTMLCanvasElement {
-		const row = parent.createDiv({ cls: `cine-sound-lanes is-${which}` });
+		const row = this.timelineEl.createDiv({
+			cls: `cine-sound-lanes is-${which}`,
+		});
 		const labels = row.createDiv({ cls: 'cine-sound-labels' });
 		const loudness = labels.createDiv({
 			cls: 'cine-sound-label',
@@ -892,8 +649,7 @@ export class CinemaSoundView extends ItemView {
 				height: `${layout.lane}px`,
 				marginBottom: `${layout.gap}px`,
 			});
-			if (which === 'detail')
-				setTooltip(label, lane.hint, { placement: 'left' });
+			if (which === 'detail') setTooltip(label, lane.hint, { placement: 'left' });
 		}
 
 		const canvas = row.createEl('canvas', { cls: 'cine-sound-canvas' });
@@ -909,7 +665,7 @@ export class CinemaSoundView extends ItemView {
 		});
 		canvas.addEventListener('click', (e) => {
 			const time = this.timeAt(which, canvas, e.offsetX);
-			const video = this.video;
+			const video = this.host.video();
 			if (time === null || !video) return;
 			video.currentTime = time;
 			this.draw();
@@ -933,12 +689,27 @@ export class CinemaSoundView extends ItemView {
 		}
 	}
 
+	/** The theme changed; every cached colour and the drawn lanes go with it. */
+	clearColors(): void {
+		this.colors.clear();
+		this.overviewBitmap = null;
+		this.overviewKey = '';
+		this.draw();
+	}
+
+	onResize(): void {
+		this.drawRetries = 0;
+		this.sizeCanvases();
+		this.draw();
+	}
+
 	/**
 	 * The lanes have no width yet; look again next frame, for about a second.
 	 *
 	 * Bounded because a view genuinely 0 px wide — a collapsed sidebar, a tab
-	 * never revealed — would otherwise hold a frame request open for as long as
-	 * it stayed open, and `onResize` will call again the moment it is not.
+	 * never revealed, the other half of this one — would otherwise hold a frame
+	 * request open for as long as it stayed open, and `onResize` will call again
+	 * the moment it is not.
 	 */
 	private retryDraw(): void {
 		if (this.drawFrame !== null || this.drawRetries >= 60) return;
@@ -958,7 +729,7 @@ export class CinemaSoundView extends ItemView {
 	private detailRange(): [number, number] {
 		const duration = this.duration();
 		const span = Math.min(this.zoom, duration);
-		const time = this.video?.currentTime ?? 0;
+		const time = this.host.video()?.currentTime ?? 0;
 		const start = Math.min(
 			Math.max(0, time - span / 3),
 			Math.max(0, duration - span),
@@ -979,16 +750,16 @@ export class CinemaSoundView extends ItemView {
 		return from + (x / width) * (to - from);
 	}
 
-	private draw(): void {
+	draw(): void {
 		const file = this.file;
 		const analysis = file ? this.plugin.sound.get(file) : null;
 		const lanes = this.lanes;
 		if (!analysis || !lanes) return;
-		// Sized here rather than in a pass of its own, the way the strip does
-		// it. A canvas whose width is still 0 — the timeline shown this very
-		// tick, the leaf laid out a frame later, the tab opened in the
-		// background — used to leave both canvases and the readout blank with
-		// nothing left to drive a second attempt.
+		// Sized here rather than in a pass of its own. A canvas whose width is
+		// still 0 — the half switched to this very tick, the leaf laid out a
+		// frame later, the tab opened in the background — used to leave both
+		// canvases and the readout blank with nothing left to drive a second
+		// attempt.
 		this.sizeCanvases();
 		if (this.overviewCanvas.width <= 1 || this.detailCanvas.width <= 1) {
 			this.retryDraw();
@@ -996,7 +767,7 @@ export class CinemaSoundView extends ItemView {
 		}
 		this.drawRetries = 0;
 		const duration = analysis.duration;
-		const time = this.video?.currentTime ?? 0;
+		const time = this.host.video()?.currentTime ?? 0;
 		const ratio = window.devicePixelRatio || 1;
 
 		// Overview: the lanes are drawn once, then the window and playhead.
@@ -1008,12 +779,11 @@ export class CinemaSoundView extends ItemView {
 			if (key !== this.overviewKey || !this.overviewBitmap) {
 				// `createEl` appends to whatever it is called on, and a document
 				// may hold only one element — asking the *document* for this
-				// canvas is what threw, and killed every draw. The timeline
-				// makes it instead and it is taken straight back out: a
-				// detached canvas is still a valid `drawImage` source, and
-				// never reaches the layout.
-				const bitmap =
-					this.overviewBitmap ?? this.timelineEl.createEl('canvas');
+				// canvas is what threw, and killed every draw. The timeline makes
+				// it instead and it is taken straight back out: a detached canvas
+				// is still a valid `drawImage` source, and never reaches the
+				// layout.
+				const bitmap = this.overviewBitmap ?? this.timelineEl.createEl('canvas');
 				bitmap.remove();
 				bitmap.width = w;
 				bitmap.height = h;
@@ -1040,11 +810,28 @@ export class CinemaSoundView extends ItemView {
 			const [from, to] = this.detailRange();
 			overview.fillStyle = this.colors.get('--text-normal', '#000');
 			overview.globalAlpha = 0.12;
-			overview.fillRect((from / duration) * w, 0, Math.max(2, ((to - from) / duration) * w), h);
+			overview.fillRect(
+				(from / duration) * w,
+				0,
+				Math.max(2, ((to - from) / duration) * w),
+				h,
+			);
 			overview.globalAlpha = 1;
-			drawLine(overview, (time / duration) * w, h, ratio, this.colors.get('--text-normal', '#000'));
+			drawLine(
+				overview,
+				(time / duration) * w,
+				h,
+				ratio,
+				this.colors.get('--text-normal', '#000'),
+			);
 			if (this.hover?.canvas === 'overview')
-				drawLine(overview, (this.hover.time / duration) * w, h, ratio, this.colors.get('--text-muted', '#888'));
+				drawLine(
+					overview,
+					(this.hover.time / duration) * w,
+					h,
+					ratio,
+					this.colors.get('--text-muted', '#888'),
+				);
 		}
 
 		// Detail: few enough bins to redraw every frame.
@@ -1068,9 +855,21 @@ export class CinemaSoundView extends ItemView {
 				color: this.colors.get,
 			});
 			const span = Math.max(to - from, 1e-6);
-			drawLine(detail, ((time - from) / span) * w, h, ratio, this.colors.get('--text-normal', '#000'));
+			drawLine(
+				detail,
+				((time - from) / span) * w,
+				h,
+				ratio,
+				this.colors.get('--text-normal', '#000'),
+			);
 			if (this.hover?.canvas === 'detail')
-				drawLine(detail, ((this.hover.time - from) / span) * w, h, ratio, this.colors.get('--text-muted', '#888'));
+				drawLine(
+					detail,
+					((this.hover.time - from) / span) * w,
+					h,
+					ratio,
+					this.colors.get('--text-muted', '#888'),
+				);
 		}
 
 		this.renderReadout(analysis, lanes, this.hover?.time ?? time);
@@ -1114,42 +913,24 @@ export class CinemaSoundView extends ItemView {
 		this.draw();
 	}
 
-	private onKeyDown(e: KeyboardEvent): void {
-		if (e.target instanceof HTMLVideoElement) return;
-		if (e.target instanceof HTMLInputElement) return;
-		const video = this.video;
-		if (!video) return;
+	/** @returns whether the key belonged to this half. */
+	onKeyDown(e: KeyboardEvent): boolean {
 		switch (e.key) {
-			case ' ':
-				if (video.paused) void video.play().catch(() => undefined);
-				else video.pause();
-				e.preventDefault();
-				break;
-			case 'ArrowRight':
-			case 'ArrowLeft': {
-				const step = (e.shiftKey ? 30 : 5) * (e.key === 'ArrowRight' ? 1 : -1);
-				video.currentTime = Math.max(0, video.currentTime + step);
-				e.preventDefault();
-				break;
-			}
 			case '=':
 			case '+':
 				this.zoom = Math.max(ZOOM_MIN, this.zoom * 0.8);
 				this.draw();
-				break;
+				return true;
 			case '-':
 				this.zoom = Math.min(ZOOM_MAX, this.zoom * 1.25);
 				this.draw();
-				break;
-			case 'f':
-				void this.toggleFullscreen();
-				break;
+				return true;
 			default:
-				break;
+				return false;
 		}
 	}
 
-	// --- actions ------------------------------------------------------------
+	// --- the run ---------------------------------------------------------------
 
 	private checkModels(): void {
 		if (this.checkingModels) return;
@@ -1157,7 +938,7 @@ export class CinemaSoundView extends ItemView {
 		void this.plugin.sound.hasModels().then((ready) => {
 			this.checkingModels = false;
 			this.modelsReady = ready;
-			this.scheduleRender();
+			this.host.refresh();
 		});
 	}
 
@@ -1173,28 +954,28 @@ export class CinemaSoundView extends ItemView {
 		}
 		this.modelsReady = null;
 		this.panel = null;
-		this.scheduleRender();
+		this.host.refresh();
 	}
 
-	private async analyse(file: TFile, force: boolean): Promise<void> {
+	private async analyse(force: boolean): Promise<void> {
+		const file = this.file;
+		if (!file) return;
 		if (!(await this.plugin.sound.hasModels())) {
 			this.modelsReady = false;
-			this.scheduleRender();
+			this.host.refresh();
 			return;
 		}
 		const result = await this.plugin.sound.analyse(file, force);
-		if (!result) {
-			const reason = this.plugin.sound.errorFor(file);
-			if (reason)
-				new Notice(
-					`Cinema canvas: sound analysis failed on ${file.name}. ${reason}`,
-					12000,
-				);
-		}
+		if (result) return;
+		const reason = this.plugin.sound.errorFor(file);
+		if (reason)
+			new Notice(
+				`Cinema canvas: sound analysis failed on ${file.name}. ${reason}`,
+				12000,
+			);
 	}
 
 	private cacheId(file: TFile): string {
 		return `${file.path}|${file.stat.size}|${file.stat.mtime}`;
 	}
 }
-

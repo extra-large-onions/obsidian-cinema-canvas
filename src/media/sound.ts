@@ -11,12 +11,14 @@ import {
 } from 'obsidian';
 import { cyrb53 } from '../utils/hash';
 import { messageOf, releaseModels } from './onnx';
+import { RUNTIME_BYTES, hasRuntime, installRuntime } from './ort-runtime';
 import {
 	ANALYSIS_FORMAT,
 	AnalysisCancelled,
 	SoundAnalysis,
 	analyseSound,
 } from './sound-analysis';
+import { cacheDir, ensureDir, migrateDir } from './vault-cache';
 
 /**
  * A model file the sound analysis needs, pinned to one exact build.
@@ -86,7 +88,10 @@ interface Job {
  * in a folder of its own.
  */
 export class SoundIndex extends Component {
+	/** Vault-relative: `_cache/cinema-canvas/sound`. */
 	private readonly dir: string;
+	/** Where readings were written before 0.11; moved into `dir` on startup. */
+	private readonly legacyDir: string;
 	/** Loaded readings by vault path, with the cache key they were read for. */
 	private readonly analyses = new Map<
 		string,
@@ -110,7 +115,8 @@ export class SoundIndex extends Component {
 		options: SoundOptions,
 	) {
 		super();
-		this.dir = normalizePath(`${pluginDir}/sound`);
+		this.dir = cacheDir('sound');
+		this.legacyDir = normalizePath(`${pluginDir}/sound`);
 		this.options = options;
 	}
 
@@ -131,7 +137,7 @@ export class SoundIndex extends Component {
 		return () => this.listeners.delete(listener);
 	}
 
-	/** Tells every open sound view to re-label, after a threshold moved. */
+	/** Tells every open sound half to re-label, after a threshold moved. */
 	retune(): void {
 		this.emit();
 	}
@@ -140,7 +146,10 @@ export class SoundIndex extends Component {
 	async init(): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		try {
-			if (!(await adapter.exists(this.dir))) await adapter.mkdir(this.dir);
+			// Before 0.11 readings lived in the plugin folder. A film's are nine
+			// minutes of analysis, so they are moved rather than redone.
+			await migrateDir(adapter, this.legacyDir, this.dir);
+			await ensureDir(adapter, this.dir);
 			const listing = await adapter.list(this.dir);
 			for (const path of listing.files)
 				if (path.endsWith('.json'))
@@ -207,6 +216,39 @@ export class SoundIndex extends Component {
 		return this.errors.get(file.path) ?? null;
 	}
 
+	/**
+	 * Carries a file's readings over to its new path.
+	 *
+	 * Readings are keyed by path and a film's take about nine minutes, so a
+	 * rename or a move renames the cache file instead of discarding it. The
+	 * in-memory copy moves first, synchronously, so a view re-rendering on the
+	 * same rename event already finds it.
+	 */
+	async rename(file: TFile, oldPath: string): Promise<void> {
+		const oldKey = this.keyFor(file, oldPath);
+		const newKey = this.keyFor(file);
+		const cached = this.analyses.get(oldPath);
+		if (cached) {
+			this.analyses.delete(oldPath);
+			this.analyses.set(file.path, {
+				key: newKey,
+				analysis: { ...cached.analysis, path: file.path },
+			});
+			this.emit();
+		}
+		if (!this.onDisk.has(oldKey) || this.onDisk.has(newKey)) return;
+		try {
+			await this.app.vault.adapter.rename(
+				normalizePath(`${this.dir}/${oldKey}`),
+				normalizePath(`${this.dir}/${newKey}`),
+			);
+			this.onDisk.delete(oldKey);
+			this.onDisk.add(newKey);
+		} catch {
+			// Left under the old name, the file is analysed again on demand.
+		}
+	}
+
 	/** Analyses `file` unless it is cached. Resolves to null on failure or stop. */
 	analyse(file: TFile, force = false): Promise<SoundAnalysis | null> {
 		if (!force) {
@@ -258,10 +300,14 @@ export class SoundIndex extends Component {
 		return this.download;
 	}
 
-	/** True when every model file is on disk at its expected size. */
+	/**
+	 * True when every model file is on disk at its expected size, and so is
+	 * the ONNX runtime, which is downloaded alongside them.
+	 */
 	async hasModels(): Promise<boolean> {
 		const dir = this.modelDir();
-		if (!dir) return false;
+		const root = this.runtimeDir();
+		if (!dir || !root || !(await hasRuntime(root))) return false;
 		for (const model of SOUND_MODELS) {
 			try {
 				if ((await stat(`${dir}/${model.name}`)).size !== model.bytes)
@@ -274,7 +320,8 @@ export class SoundIndex extends Component {
 	}
 
 	/**
-	 * Fetches whichever model files are missing, streaming them to disk.
+	 * Fetches whichever model files are missing, streaming them to disk, and
+	 * the ONNX runtime first if that is missing too (see `ort-runtime.ts`).
 	 *
 	 * Streamed rather than fetched with `requestUrl`, which would hold all
 	 * 330 MB in memory at once and could not report progress. Nothing about
@@ -284,11 +331,13 @@ export class SoundIndex extends Component {
 	async downloadModels(): Promise<void> {
 		if (this.download) return;
 		const dir = this.modelDir();
-		if (!dir)
+		const root = this.runtimeDir();
+		if (!dir || !root)
 			throw new Error(
 				'The vault is not on a normal file system, so the models have nowhere to go.',
 			);
 		await mkdir(dir, { recursive: true });
+		const needsRuntime = !(await hasRuntime(root));
 
 		const missing: ModelFile[] = [];
 		for (const model of SOUND_MODELS) {
@@ -300,22 +349,26 @@ export class SoundIndex extends Component {
 			}
 			missing.push(model);
 		}
-		const total = missing.reduce((a, m) => a + m.bytes, 0);
+		const total =
+			missing.reduce((a, m) => a + m.bytes, 0) +
+			(needsRuntime ? RUNTIME_BYTES : 0);
 		this.download = { received: 0, total };
 		this.emit();
 		let lastEmit = 0;
+		const progress = (before: number) => (bytes: number) => {
+			if (!this.download) return;
+			this.download.received = before + bytes;
+			const now = Date.now();
+			if (now - lastEmit > 200) {
+				lastEmit = now;
+				this.emit();
+			}
+		};
 		try {
+			if (needsRuntime) await installRuntime(root, progress(0));
 			for (const model of missing) {
 				const before = this.download.received;
-				await fetchVerified(model, `${dir}/${model.name}`, (bytes) => {
-					if (!this.download) return;
-					this.download.received = before + bytes;
-					const now = Date.now();
-					if (now - lastEmit > 200) {
-						lastEmit = now;
-						this.emit();
-					}
-				});
+				await fetchVerified(model, `${dir}/${model.name}`, progress(before));
 			}
 		} finally {
 			this.download = null;
@@ -402,12 +455,13 @@ export class SoundIndex extends Component {
 	}
 
 	/** `<path hash>_<size>_<mtime>.json`, so a re-exported file is re-analysed. */
-	private keyFor(file: TFile): string {
-		return `${this.prefixFor(file)}${file.stat.size.toString(36)}_${file.stat.mtime.toString(36)}.json`;
+	/** @param path the path to name it for; a rename asks for the old one. */
+	private keyFor(file: TFile, path = file.path): string {
+		return `${this.prefixFor(path)}${file.stat.size.toString(36)}_${file.stat.mtime.toString(36)}.json`;
 	}
 
-	private prefixFor(file: TFile): string {
-		return `${cyrb53(file.path).toString(36)}_`;
+	private prefixFor(path: string): string {
+		return `${cyrb53(path).toString(36)}_`;
 	}
 
 	private async save(file: TFile, analysis: SoundAnalysis): Promise<void> {
@@ -424,7 +478,7 @@ export class SoundIndex extends Component {
 			return;
 		}
 		// Readings of an older version of the same file are dead weight.
-		const prefix = this.prefixFor(file);
+		const prefix = this.prefixFor(file.path);
 		for (const name of [...this.onDisk]) {
 			if (name === key || !name.startsWith(prefix)) continue;
 			this.onDisk.delete(name);
