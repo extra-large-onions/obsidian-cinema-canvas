@@ -1,4 +1,5 @@
 import type { Shot } from '../types';
+import { FrameMark, markJson, parseMarks } from './marks';
 
 /**
  * Scenes and cut labels: the first thing in this plugin made by hand rather
@@ -57,11 +58,14 @@ export interface CutLabel {
 export interface FilmNotes {
 	scenes: SceneDef[];
 	labels: CutLabel[];
+	/** Arrows, circles and text drawn over the film; see `marks.ts`. */
+	marks: FrameMark[];
 }
 
 export const EMPTY_NOTES: FilmNotes = Object.freeze({
 	scenes: [],
 	labels: [],
+	marks: [],
 });
 
 /** One scene as it falls on the current cuts. */
@@ -500,9 +504,14 @@ export function parseBlock(source: string): ParsedNotes {
 	}
 	if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
 		return fail(`The ${BLOCK_LANGUAGE} block should be one JSON object.`);
-	const { scenes: rawScenes = [], labels: rawLabels = [] } = raw as {
+	const {
+		scenes: rawScenes = [],
+		labels: rawLabels = [],
+		marks: rawMarks = [],
+	} = raw as {
 		scenes?: unknown;
 		labels?: unknown;
+		marks?: unknown;
 	};
 	if (!Array.isArray(rawScenes) || !Array.isArray(rawLabels))
 		return fail('"scenes" and "labels" should both be lists.');
@@ -549,8 +558,14 @@ export function parseBlock(source: string): ParsedNotes {
 			);
 		labels.push({ at, text });
 	}
+	const marks = parseMarks(rawMarks);
+	if ('error' in marks) return fail(marks.error);
 	return {
-		notes: { scenes, labels: labels.sort((a, b) => a.at - b.at) },
+		notes: {
+			scenes,
+			labels: labels.sort((a, b) => a.at - b.at),
+			marks: marks.marks,
+		},
 		error: null,
 	};
 }
@@ -567,7 +582,9 @@ export function formatBlock(notes: FilmNotes): string {
 		// Tags only where there are some, so a note written before tags existed
 		// reads the same after its first edit.
 		`  "scenes": ${list(notes.scenes.map((s) => (s.tags.length > 0 ? { id: s.id, title: s.title, tags: s.tags, cuts: s.cuts } : { id: s.id, title: s.title, cuts: s.cuts })))},`,
-		`  "labels": ${list(notes.labels.map((l) => ({ at: l.at, text: l.text })))}`,
+		`  "labels": ${list(notes.labels.map((l) => ({ at: l.at, text: l.text })))}${notes.marks.length > 0 ? ',' : ''}`,
+		// Marks only where there are some, for the same reason as tags.
+		...(notes.marks.length > 0 ? [`  "marks": ${list(notes.marks.map(markJson))}`] : []),
 		'}',
 		'```',
 	].join('\n');

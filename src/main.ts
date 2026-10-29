@@ -7,6 +7,8 @@ import { MediaIndex } from './media/media-index';
 import { SceneStore } from './media/scene-store';
 import { BLOCK_LANGUAGE, tagKey } from './media/scenes';
 import { ShotIndex } from './media/shots';
+import { DepthEstimator } from './media/depth-model';
+import { FaceDetector } from './media/faces';
 import { SoundIndex } from './media/sound';
 import type { SoundParamKey } from './media/sound-analysis';
 import { ThumbnailStore } from './media/thumbnails';
@@ -24,6 +26,7 @@ import { CinemaCanvasView, VIEW_TYPE_CINEMA_CANVAS } from './view/canvas-view';
 import { CinemaClipView, VIEW_TYPE_CINEMA_CLIP } from './view/clip-view';
 import { renderSceneBlock } from './view/scene-block';
 import type { ShotParamKey } from './view/shot-controls';
+import { MASK_RATIOS, type GuideState } from './view/framing';
 import type { MediaItem } from './types';
 
 /** Audio-only formats the sound half accepts on top of every video format. */
@@ -46,6 +49,8 @@ export default class CinemaCanvasPlugin extends Plugin {
 	thumbnails!: ThumbnailStore;
 	shots!: ShotIndex;
 	sound!: SoundIndex;
+	faces!: FaceDetector;
+	depth!: DepthEstimator;
 	scenes!: SceneStore;
 
 	async onload(): Promise<void> {
@@ -73,6 +78,10 @@ export default class CinemaCanvasPlugin extends Plugin {
 			ffmpegPath: this.settings.ffmpegPath,
 		});
 		this.addChild(this.sound);
+
+		this.faces = new FaceDetector(this.app, pluginDir);
+		this.depth = new DepthEstimator(this.app, pluginDir);
+		this.register(() => this.depth.dispose());
 
 		this.scenes = new SceneStore(this.app);
 		this.addChild(this.scenes);
@@ -348,6 +357,30 @@ export default class CinemaCanvasPlugin extends Plugin {
 			if (leaf.view instanceof CinemaClipView) leaf.view.render();
 	}
 
+	/**
+	 * Shows or hides the framing guides in every open canvas.
+	 *
+	 * Drawn straight onto the cells already mounted, not through
+	 * `saveSettings`, which would tear every cell down to flip a few lines.
+	 */
+	setGuides(state: GuideState): void {
+		this.settings.guideCenter = state.center;
+		this.settings.guideTriangle = state.triangle;
+		this.settings.guideThirds = state.thirds;
+		this.settings.guideMask = state.mask;
+		for (const view of this.canvasViews()) view.applyGuides();
+		this.saveShotParams();
+	}
+
+	/** Turns the lighting readout on or off in every viewer and film tab. */
+	setLighting(on: boolean): void {
+		this.settings.lightingReadout = on;
+		for (const view of this.canvasViews()) view.applyLighting();
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CINEMA_CLIP))
+			if (leaf.view instanceof CinemaClipView) leaf.view.render();
+		this.saveShotParams();
+	}
+
 	private readonly saveShotParams = debounce(() => {
 		void this.saveData(this.settings);
 	}, 500);
@@ -363,6 +396,15 @@ export default class CinemaCanvasPlugin extends Plugin {
 		this.settings.sceneTags = Array.isArray(tags)
 			? tags.filter((t): t is string => typeof t === 'string' && t.trim() !== '')
 			: [...DEFAULT_SETTINGS.sceneTags];
+		if (!['off', 'falling', 'rising'].includes(this.settings.guideTriangle))
+			this.settings.guideTriangle = 'off';
+		// Short-lived keys from the phi grid, which was removed.
+		const legacy = this.settings as { guideGrid?: unknown; guidePhi?: unknown };
+		if (legacy.guideGrid === 'thirds') this.settings.guideThirds = true;
+		delete legacy.guideGrid;
+		delete legacy.guidePhi;
+		if (!MASK_RATIOS.includes(this.settings.guideMask))
+			this.settings.guideMask = 0;
 	}
 
 	/**
@@ -497,6 +539,27 @@ export default class CinemaCanvasPlugin extends Plugin {
 		viewCommand('previous-item', 'Previous item', (v) => v.step(-1));
 		viewCommand('toggle-playback', 'Play or pause selected clip', (v) =>
 			v.togglePlayback(),
+		);
+		viewCommand('toggle-thirds-guide', 'Toggle rule of thirds', (v) =>
+			v.pressGuide('g'),
+		);
+		viewCommand('toggle-center-guide', 'Toggle center guide', (v) =>
+			v.pressGuide('c'),
+		);
+		viewCommand(
+			'cycle-triangle-guide',
+			'Cycle triangle guide (off, left, right)',
+			(v) => v.pressGuide('t'),
+		);
+		viewCommand(
+			'cycle-aspect-mask',
+			'Cycle aspect mask (off, 2.39, 1.85, 16:9, 4:3, 1:1, 9:16)',
+			(v) => v.pressGuide('m'),
+		);
+		viewCommand(
+			'toggle-lighting-readout',
+			'Toggle lighting readout in full screen',
+			(v) => v.toggleLighting(),
 		);
 		viewCommand('toggle-fullscreen', 'Toggle full screen viewer', (v) =>
 			v.toggleLightbox(),

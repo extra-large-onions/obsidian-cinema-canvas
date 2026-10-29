@@ -1,6 +1,14 @@
 import { ItemView, Notice, WorkspaceLeaf, setIcon, setTooltip } from 'obsidian';
 import type CinemaCanvasPlugin from '../main';
 import { GroupBox, ItemBox, LayoutResult, MediaItem, Rect, Shot } from '../types';
+import {
+	GUIDE_CONTROLS,
+	GuideControl,
+	GuideState,
+	anyGuide,
+	buildGuideButtons,
+	guideForKey,
+} from './framing';
 import { computeLayout, expand, intersects, layoutMetrics } from './layout';
 import { Lightbox } from './lightbox';
 import { CellContext, MediaCell } from './media-cell';
@@ -55,6 +63,7 @@ export class CinemaCanvasView extends ItemView {
 	private playingCell: MediaCell | null = null;
 	/** True while the lightbox is showing one clip's shots, not the canvas. */
 	private shotLightbox = false;
+	private syncGuideButtons: (state: GuideState) => void = () => {};
 
 	constructor(leaf: WorkspaceLeaf, plugin: CinemaCanvasPlugin) {
 		super(leaf);
@@ -113,6 +122,17 @@ export class CinemaCanvasView extends ItemView {
 
 		this.lightbox = new Lightbox(this.app, root, {
 			loopVideos: this.plugin.settings.loopLightboxVideos,
+			guides: this.guideState(),
+			onGuide: (control) => this.applyGuideControl(control),
+			lighting: this.plugin.settings.lightingReadout,
+			onToggleLighting: () =>
+				this.plugin.setLighting(!this.plugin.settings.lightingReadout),
+			faces: this.plugin.faces,
+			readFaces: () => this.plugin.settings.lightingFaces,
+			depth: this.plugin.depth,
+			readDepth: () => this.plugin.settings.lightingDepth,
+			notes: this.plugin.scenes,
+			shotsFor: (item) => this.plugin.shots.get(item),
 			onIndexChange: (index) => this.onLightboxIndex(index),
 			onClose: () => this.viewportEl.focus(),
 		});
@@ -184,6 +204,7 @@ export class CinemaCanvasView extends ItemView {
 			this.updateStatus();
 		});
 
+		this.applyGuides();
 		this.unsubscribe = this.plugin.index.onChange(() => this.rebuild(false));
 		this.rebuild(false);
 		this.viewportEl.focus();
@@ -216,6 +237,61 @@ export class CinemaCanvasView extends ItemView {
 		// Cell geometry and caption state are baked in at construction.
 		this.cellContext = this.buildCellContext();
 		this.rebuild(true);
+	}
+
+	// --- framing guides ---------------------------------------------------
+
+	private guideState(): GuideState {
+		return {
+			center: this.plugin.settings.guideCenter,
+			triangle: this.plugin.settings.guideTriangle,
+			thirds: this.plugin.settings.guideThirds,
+			mask: this.plugin.settings.guideMask,
+		};
+	}
+
+	/** Presses the guide button bound to `key`, as its key would. */
+	pressGuide(key: string): void {
+		const control = GUIDE_CONTROLS.find((c) => c.key === key);
+		if (control) this.applyGuideControl(control);
+	}
+
+	private applyGuideControl(control: GuideControl): void {
+		this.plugin.setGuides(control.next(this.guideState()));
+	}
+
+	/** Called by the plugin whenever the guides change, in any canvas. */
+	applyGuides(): void {
+		const state = this.guideState();
+		for (const cell of this.cells.values()) cell.setGuides(state);
+		this.lightbox.setOptions({ guides: state });
+		this.syncGuideButtons(state);
+		this.updateGuideZoom();
+	}
+
+	/**
+	 * The lighting readout lives in the full screen viewer, where the picture
+	 * is big enough to read; asking for it from the canvas opens the viewer.
+	 */
+	toggleLighting(): void {
+		const on = !this.plugin.settings.lightingReadout;
+		this.plugin.setLighting(on);
+		if (on && !this.lightbox.isOpen) this.openLightbox();
+	}
+
+	/** Called by the plugin when the lighting readout is turned on or off. */
+	applyLighting(): void {
+		this.lightbox.setOptions({
+			lighting: this.plugin.settings.lightingReadout,
+		});
+	}
+
+	/** Lets guide lines divide out the zoom, so they stay thin on screen. */
+	private updateGuideZoom(): void {
+		if (!anyGuide(this.guideState())) return;
+		this.viewportEl.setCssProps({
+			'--cine-zoom': String(this.viewport.scale),
+		});
 	}
 
 	private buildCellContext(): CellContext {
@@ -354,6 +430,8 @@ export class CinemaCanvasView extends ItemView {
 		}
 
 		const screenWidth = this.cellScreenWidth();
+		const guides = this.guideState();
+		this.updateGuideZoom();
 		let budget = MOUNT_BUDGET;
 		let deferred = false;
 		for (const { box, distance } of candidates) {
@@ -370,6 +448,7 @@ export class CinemaCanvasView extends ItemView {
 			}
 			cell.place(box);
 			cell.setSelected(this.selectedIndex === box.index);
+			cell.setGuides(guides);
 			cell.update(screenWidth, distance);
 		}
 		return deferred;
@@ -438,6 +517,15 @@ export class CinemaCanvasView extends ItemView {
 		add('chevron-right', 'Next (→)', () => this.step(1));
 		add('expand', 'Full screen (F)', () => this.openLightbox());
 		bar.createDiv({ cls: 'cine-toolbar-divider' });
+		this.syncGuideButtons = buildGuideButtons(
+			bar,
+			'cine-toolbar-button',
+			(control) => {
+				this.applyGuideControl(control);
+				this.viewportEl.focus();
+			},
+		);
+		bar.createDiv({ cls: 'cine-toolbar-divider' });
 		add('refresh-cw', 'Rescan vault', () => {
 			this.plugin.thumbnails.resetFailures();
 			this.plugin.index.rebuild();
@@ -505,6 +593,26 @@ export class CinemaCanvasView extends ItemView {
 	}
 
 	private onKeyDown(e: KeyboardEvent): void {
+		// Typing a label or picking from a list is not a shortcut.
+		const target = e.target;
+		if (
+			target instanceof HTMLInputElement ||
+			target instanceof HTMLTextAreaElement ||
+			target instanceof HTMLSelectElement
+		)
+			return;
+		if (this.lightbox.handleKey(e)) {
+			e.preventDefault();
+			return;
+		}
+		// Guides work the same over the canvas and in the viewer.
+		const guide = guideForKey(e);
+		if (guide) {
+			this.applyGuideControl(guide);
+			e.preventDefault();
+			return;
+		}
+
 		if (this.lightbox.isOpen) {
 			switch (e.key) {
 				case 'Escape':
@@ -523,6 +631,10 @@ export class CinemaCanvasView extends ItemView {
 				case 'f':
 				case 'F11':
 					void this.lightbox.toggleNativeFullscreen();
+					break;
+				case 'l':
+					if (e.ctrlKey || e.metaKey || e.altKey) return;
+					this.toggleLighting();
 					break;
 				default:
 					return;

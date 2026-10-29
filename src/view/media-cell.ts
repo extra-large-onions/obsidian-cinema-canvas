@@ -2,6 +2,7 @@ import { App, setIcon } from 'obsidian';
 import { ThumbnailStore } from '../media/thumbnails';
 import { CinemaCanvasSettings } from '../settings';
 import { ItemBox, Shot } from '../types';
+import { FramingGuides, GuideState, anyGuide, containRect } from './framing';
 import { LayoutMetrics } from './layout';
 import { SegmentPlayer } from './segment-player';
 
@@ -58,6 +59,10 @@ export class MediaCell {
 	private item: ItemBox;
 	/** Set while playback is confined to one shot; cleared when it stops. */
 	private activeShot: Shot | null = null;
+	/** Built the first time a guide is switched on, then kept. */
+	private guides: FramingGuides | null = null;
+	/** Width over height of the picture, once anything has loaded. */
+	private aspect = 0;
 
 	constructor(
 		box: ItemBox,
@@ -74,6 +79,10 @@ export class MediaCell {
 		this.img.draggable = false;
 		this.img.decoding = 'async';
 		this.img.hide();
+		this.img.addEventListener('load', () => {
+			if (this.img.naturalHeight > 0)
+				this.setAspect(this.img.naturalWidth / this.img.naturalHeight);
+		});
 
 		if (box.item.kind === 'video') {
 			this.el.addClass('is-video');
@@ -116,6 +125,18 @@ export class MediaCell {
 		this.el.style.width = `${box.w}px`;
 		this.el.style.height = `${box.h}px`;
 		this.frame.style.height = `${this.ctx.metrics.cellHeight}px`;
+		this.placeGuides();
+	}
+
+	/** Draws the framing guides over the picture, or takes them away. */
+	setGuides(state: GuideState): void {
+		if (!this.guides) {
+			if (!anyGuide(state)) return;
+			this.guides = new FramingGuides(this.frame);
+			this.guides.setAspect(this.aspect);
+			this.placeGuides();
+		}
+		this.guides.setState(state);
 	}
 
 	setSelected(selected: boolean): void {
@@ -275,6 +296,8 @@ export class MediaCell {
 		this.cancelRequest = null;
 		this.pendingTier = null;
 		this.teardownVideo();
+		this.guides?.destroy();
+		this.guides = null;
 		// Dropping the src lets the decoded bitmap go straight away instead of
 		// lingering until the element is collected.
 		this.img.removeAttribute('src');
@@ -291,6 +314,24 @@ export class MediaCell {
 		this.stub?.remove();
 		this.stub = null;
 		this.el.removeClass('is-loading');
+	}
+
+	private setAspect(aspect: number): void {
+		if (!(aspect > 0) || aspect === this.aspect) return;
+		this.aspect = aspect;
+		this.guides?.setAspect(aspect);
+		this.placeGuides();
+	}
+
+	/**
+	 * Fits the guides to the picture rather than the cell: media is contained,
+	 * not cropped, so a 2.39 clip in a 16:9 cell has bars above and below.
+	 */
+	private placeGuides(): void {
+		if (!this.guides || this.aspect <= 0) return;
+		this.guides.place(
+			containRect(this.item.w, this.ctx.metrics.cellHeight, this.aspect),
+		);
 	}
 
 	private showStub(): void {
@@ -310,6 +351,11 @@ export class MediaCell {
 		video.playsInline = true;
 		video.preload = 'auto';
 		video.controls = false;
+		// With thumbnails off there is no still to measure; the clip is.
+		video.addEventListener('loadedmetadata', () => {
+			if (video.videoHeight > 0)
+				this.setAspect(video.videoWidth / video.videoHeight);
+		});
 		this.video = video;
 		return video;
 	}

@@ -34,6 +34,8 @@ import { DETECTOR_LABEL } from '../media/shots';
 import { DETECTION_SECONDS_PER_SECOND } from '../media/transnet';
 import { MediaItem, Shot } from '../types';
 import { formatTimecode } from '../utils/timecode';
+import { containRect } from './framing';
+import { LightMeter } from './light-meter';
 import { SceneBoard } from './scene-board';
 import { ScenePickerModal } from './scene-picker';
 import { SegmentPlayer } from './segment-player';
@@ -175,6 +177,9 @@ export class CinemaClipView extends ItemView {
 	private video: HTMLVideoElement | null = null;
 	/** Confines playback to a clicked cut or scene, to the frame. */
 	private player: SegmentPlayer | null = null;
+	/** The lighting readout over the picture; one per video, like the player. */
+	private meter: LightMeter | null = null;
+	private meterObserver: ResizeObserver | null = null;
 	private ribbonEl!: HTMLElement;
 	private playheadEl!: HTMLElement;
 	private belowEl!: HTMLElement;
@@ -461,6 +466,10 @@ export class CinemaClipView extends ItemView {
 	}
 
 	private dropVideo(): void {
+		this.meterObserver?.disconnect();
+		this.meterObserver = null;
+		this.meter?.destroy();
+		this.meter = null;
 		this.player?.destroy();
 		this.player = null;
 		this.sequence = null;
@@ -513,6 +522,7 @@ export class CinemaClipView extends ItemView {
 
 		// One file, three questions, one player. The sound and scenes halves
 		// keep the header and the picture, and swap everything under them.
+		this.applyLighting();
 		if (this.half === 'sound') {
 			this.boardEl.hide();
 			this.renderSoundHalf(item);
@@ -700,6 +710,7 @@ export class CinemaClipView extends ItemView {
 			this.mode,
 			this.loopSegment,
 			this.panelOpen,
+			this.plugin.settings.lightingReadout,
 			pane?.analysed() ?? false,
 			pane?.cta()?.label ?? '',
 		].join('|');
@@ -710,6 +721,7 @@ export class CinemaClipView extends ItemView {
 		this.renderHalfSwitch(item, d);
 
 		if (this.half === 'scenes') {
+			this.lightButton();
 			this.iconButton('expand', 'Full screen, keeping every control (F)', () =>
 				void this.toggleFullscreen(),
 			);
@@ -763,6 +775,7 @@ export class CinemaClipView extends ItemView {
 			);
 			loop.toggleClass('is-active', this.loopSegment);
 
+			this.lightButton();
 			this.iconButton('expand', 'Full screen, keeping every control (F)', () =>
 				void this.toggleFullscreen(),
 			);
@@ -1015,6 +1028,68 @@ export class CinemaClipView extends ItemView {
 				this.scheduleRender();
 		});
 		this.video = video;
+		this.buildMeter(video);
+	}
+
+	/**
+	 * The same readout as the full screen viewer, laid over the picture the
+	 * video element letterboxes inside the stage.
+	 */
+	private buildMeter(video: HTMLVideoElement): void {
+		const plugin = this.plugin;
+		const meter = new LightMeter(this.stageEl, {
+			faces: plugin.faces,
+			readFaces: () => plugin.settings.lightingFaces,
+			depth: plugin.depth,
+			readDepth: () => plugin.settings.lightingDepth,
+		});
+		meter.attach(video);
+		this.meter = meter;
+		const place = () => {
+			if (!video.videoWidth || !video.videoHeight) return;
+			const box = video.getBoundingClientRect();
+			const origin = this.stageEl.getBoundingClientRect();
+			const fit = containRect(box.width, box.height, video.videoWidth / video.videoHeight);
+			meter.place({
+				x: box.left - origin.left + fit.x,
+				y: box.top - origin.top + fit.y,
+				w: fit.w,
+				h: fit.h,
+			});
+		};
+		video.addEventListener('loadedmetadata', () => {
+			place();
+			this.applyLighting();
+		});
+		this.meterObserver = new ResizeObserver(place);
+		this.meterObserver.observe(video);
+		this.meterObserver.observe(this.stageEl);
+		this.applyLighting();
+	}
+
+	/**
+	 * Shows or hides the readout as the setting says. Only over a picture:
+	 * never on the sound half, nor for a file with no picture.
+	 */
+	applyLighting(): void {
+		const video = this.video;
+		this.meter?.setEnabled(
+			this.plugin.settings.lightingReadout &&
+				this.half !== 'sound' &&
+				video !== null &&
+				video.videoHeight > 0,
+		);
+	}
+
+	/** Shares its setting with the full screen viewer. */
+	private lightButton(): void {
+		const on = this.plugin.settings.lightingReadout;
+		const button = this.iconButton(
+			'sun',
+			on ? 'Hide the lighting readout' : 'Lighting readout',
+			() => this.plugin.setLighting(!on),
+		);
+		button.toggleClass('is-active', on);
 	}
 
 	/**

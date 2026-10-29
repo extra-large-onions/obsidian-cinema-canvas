@@ -762,6 +762,7 @@
  * worth opening over the lightbox.
  */
 .cine-clip-stage {
+	position: relative;
 	flex: 1 1 46%;
 	display: flex;
 	align-items: center;
@@ -2029,4 +2030,873 @@
 		border-right: none;
 		border-bottom: 1px solid var(--background-modifier-border);
 	}
+}
+
+/* ---------- framing guides ---------- */
+
+/*
+ * Laid over the picture itself, not the cell. Two layers: the mask darkens
+ * what a crop would lose, and the lines above it use `difference` so they read
+ * on a white sky and a black night alike. Line width divides out the canvas
+ * zoom (`--cine-zoom`, set on the viewport) so it stays thin on screen.
+ */
+.cine-guides {
+	position: absolute;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.cine-guides.is-hidden {
+	display: none;
+}
+
+.cine-guides-mask {
+	z-index: 1;
+}
+
+.cine-guides-mask rect {
+	fill: rgba(0, 0, 0, 0.72);
+}
+
+.cine-guides-lines {
+	z-index: 2;
+	mix-blend-mode: difference;
+}
+
+.cine-guides-lines line,
+.cine-guides-lines circle,
+.cine-guides-lines rect {
+	fill: none;
+	stroke: rgba(255, 255, 255, 0.85);
+	stroke-width: calc(1.5px / var(--cine-zoom, 1));
+}
+
+.cine-toolbar-button.is-active,
+.cine-lightbox-actions button.is-active {
+	color: var(--interactive-accent);
+}
+
+/* The triangle button leans the way the guide does. */
+.cine-toolbar-button.is-flipped svg,
+.cine-lightbox-actions button.is-flipped svg {
+	transform: scaleX(-1);
+}
+
+/* The mask's ratio, beside its button's icon while it is on. */
+.cine-guide-badge {
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-guide-badge:not(:empty) {
+	margin-left: 4px;
+}
+
+/* ---------- lighting readout ---------- */
+
+/* Marks on the picture, drawn in the frame's own pixels (see LightMeter). */
+.cine-light-overlay {
+	position: absolute;
+	z-index: 3;
+	pointer-events: none;
+}
+
+.cine-light-overlay svg {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
+.cine-light-overlay .cine-light-edge {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.6)) drop-shadow(0 0 5px rgba(255, 190, 90, 0.5));
+}
+
+.cine-light-edge-value {
+	color: rgb(255, 208, 128);
+}
+
+.cine-light-overlay rect,
+.cine-light-overlay line {
+	vector-effect: non-scaling-stroke;
+	fill: none;
+}
+
+.cine-light-face {
+	stroke: rgba(255, 255, 255, 0.8);
+	stroke-width: 1.5px;
+}
+
+.cine-light-axis {
+	stroke: rgba(255, 255, 255, 0.55);
+	stroke-width: 1px;
+	stroke-dasharray: 4 4;
+}
+
+.cine-light-overlay .cine-light-side {
+	stroke: rgba(0, 0, 0, 0.6);
+	stroke-width: 1px;
+}
+
+.cine-light-rim {
+	stroke: #ffe066;
+	stroke-width: 3px;
+	stroke-linecap: round;
+}
+
+.cine-light-chip {
+	position: absolute;
+	margin-top: 4px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: rgba(0, 0, 0, 0.7);
+	color: #fff;
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.cine-light-chip.is-brightest {
+	color: #ffe066;
+}
+
+.cine-light-panel {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	z-index: 4;
+	width: 270px;
+	max-height: calc(50% - 40px);
+	overflow-y: auto;
+	padding: 10px 12px;
+	border-radius: 8px;
+	background: rgba(20, 20, 20, 0.82);
+	color: #e8e8e8;
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	line-height: 1.45;
+}
+
+.cine-light-head {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+
+.cine-light-title {
+	font-weight: 600;
+	font-size: var(--font-ui-small);
+}
+
+.cine-light-note,
+.cine-light-muted {
+	color: #9a9a9a;
+}
+
+.cine-light-section + .cine-light-section,
+.cine-light-model {
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.cine-light-section-title {
+	margin-bottom: 2px;
+	color: #bdbdbd;
+	font-weight: 600;
+}
+
+.cine-light-row {
+	display: flex;
+	gap: 8px;
+}
+
+.cine-light-label {
+	flex: 0 0 82px;
+	color: #9a9a9a;
+}
+
+.cine-light-swatch {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	margin-right: 3px;
+	border-radius: 2px;
+	outline: 1px solid rgba(255, 255, 255, 0.3);
+	vertical-align: -1px;
+}
+
+.cine-light-error {
+	color: var(--text-error);
+}
+
+.cine-light-model button {
+	margin-top: 6px;
+}
+
+/* In the film tab the stage is short: the panel may take its full height. */
+.cine-clip-stage .cine-light-panel {
+	max-height: calc(100% - 24px);
+}
+
+/* ---------- frame marks ---------- */
+
+/* Drawn in the picture's own pixels (see MarkLayer); over guides and tints. */
+.cine-marks {
+	position: absolute;
+	z-index: 5;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.cine-marks.is-hidden {
+	display: none;
+}
+
+.cine-marks.is-drawing {
+	pointer-events: all;
+	cursor: crosshair;
+}
+
+.cine-marks.is-drawing.is-selecting {
+	cursor: default;
+}
+
+.cine-mark {
+	filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55))
+		drop-shadow(0 0 6px rgba(0, 0, 0, 0.25));
+}
+
+.cine-mark-hit {
+	fill: none;
+	stroke: transparent;
+	pointer-events: none;
+}
+
+.cine-marks.is-drawing .cine-mark-hit {
+	pointer-events: stroke;
+	cursor: move;
+}
+
+.cine-marks.is-drawing .cine-mark-pill {
+	cursor: move;
+}
+
+.cine-mark-text {
+	fill: #141414;
+	font-family: var(--font-interface);
+	font-weight: 650;
+	letter-spacing: 0.01em;
+	pointer-events: none;
+}
+
+.cine-mark.is-draft {
+	opacity: 0.85;
+}
+
+/* The selection while the film is outside its range: there, but not shown. */
+.cine-mark.is-ghost {
+	opacity: 0.35;
+}
+
+.cine-mark.is-selected {
+	filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 5px rgba(255, 255, 255, 0.55));
+}
+
+.cine-mark-handle {
+	fill: #fff;
+	stroke: rgba(0, 0, 0, 0.7);
+	stroke-width: 1.5;
+	cursor: grab;
+	filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+
+.cine-mark-input {
+	position: absolute;
+	z-index: 7;
+	min-width: 8em;
+	padding: 0.2em 0.5em;
+	border: none;
+	border-radius: 0.35em;
+	background: var(--mark-color, #fff);
+	color: #141414;
+	font-family: var(--font-interface);
+	font-weight: 650;
+	line-height: 1.2;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+	outline: none;
+}
+
+.cine-mark-input::placeholder {
+	color: rgba(0, 0, 0, 0.45);
+}
+
+/* The strip over the picture while drawing. */
+.cine-mark-toolbar {
+	position: absolute;
+	top: 12px;
+	left: 50%;
+	z-index: 8;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	max-width: calc(100% - 24px);
+	padding: 4px;
+	border-radius: 10px;
+	background: rgba(24, 24, 26, 0.88);
+	box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(8px);
+	transform: translateX(-50%);
+	color: #eee;
+	font-size: var(--font-ui-smaller);
+	flex-wrap: wrap;
+	justify-content: center;
+}
+
+.cine-mark-group {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 0 4px;
+}
+
+.cine-mark-group + .cine-mark-group {
+	border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.cine-mark-group.is-hidden {
+	display: none;
+}
+
+.cine-mark-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 30px;
+	height: 30px;
+	padding: 0;
+	border: none;
+	border-radius: 7px;
+	background: transparent;
+	color: #ddd;
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.cine-mark-button:hover {
+	background: rgba(255, 255, 255, 0.12);
+	color: #fff;
+}
+
+.cine-mark-button.is-active {
+	background: rgba(255, 255, 255, 0.18);
+	color: #fff;
+}
+
+.cine-mark-button:disabled {
+	opacity: 0.3;
+	cursor: default;
+	background: transparent;
+}
+
+.cine-mark-button.is-done {
+	color: var(--interactive-accent);
+}
+
+.cine-mark-swatch {
+	width: 20px;
+	height: 20px;
+	margin: 0 2px;
+	padding: 0;
+	border: 2px solid transparent;
+	border-radius: 50%;
+	background: var(--swatch);
+	background-clip: padding-box;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+	cursor: pointer;
+}
+
+.cine-mark-swatch.is-active {
+	box-shadow: 0 0 0 2px #fff;
+}
+
+.cine-mark-range {
+	height: 28px;
+	font-size: var(--font-ui-smaller);
+	background-color: rgba(255, 255, 255, 0.08);
+	color: #eee;
+	border: none;
+	box-shadow: none;
+}
+
+.cine-mark-selection-text {
+	max-width: 220px;
+	padding: 0 6px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: #ccc;
+	font-variant-numeric: tabular-nums;
+}
+
+/* Where marks fall on the film, just under the picture. */
+.cine-mark-track {
+	position: absolute;
+	z-index: 6;
+	height: 10px;
+	border-radius: 5px;
+	background: rgba(255, 255, 255, 0.08);
+	cursor: pointer;
+	touch-action: none;
+}
+
+.cine-mark-tick {
+	position: absolute;
+	top: 2px;
+	bottom: 2px;
+	min-width: 3px;
+	border-radius: 3px;
+	background: var(--mark-color, #fff);
+	opacity: 0.8;
+	transform: translateX(-1px);
+}
+
+.cine-mark-tick:hover,
+.cine-mark-tick.is-selected {
+	opacity: 1;
+	top: 0;
+	bottom: 0;
+	box-shadow: 0 0 0 1px #fff;
+}
+
+.cine-mark-playhead {
+	position: absolute;
+	top: -3px;
+	bottom: -3px;
+	width: 2px;
+	margin-left: -1px;
+	border-radius: 1px;
+	background: #fff;
+	pointer-events: none;
+	box-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+}
+
+/* ---------- light zones and the spot loupe ---------- */
+
+.cine-light-marks,
+.cine-zone-chips {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+.cine-zone-shadow {
+	fill: none;
+	stroke: rgba(0, 0, 0, 0.35);
+	stroke-width: 2.5px;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+}
+
+.cine-zone-line {
+	fill: none;
+	stroke: rgba(255, 255, 255, 0.55);
+	stroke-width: 1px;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+	transition: stroke 120ms ease, stroke-width 120ms ease;
+}
+
+.cine-zone-line.is-hovered {
+	stroke: #fff;
+	stroke-width: 1.5px;
+}
+
+.cine-zone-line.is-faded {
+	stroke: rgba(255, 255, 255, 0.12);
+}
+
+/* Everything but the zone pointed at, dimmed behind a feathered edge. */
+.cine-zone-veil {
+	fill: rgba(0, 0, 0, 0.62);
+}
+
+.cine-zone-chip {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 9px 3px 7px;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 999px;
+	background: rgba(14, 14, 16, 0.6);
+	backdrop-filter: blur(6px);
+	color: #f2f2f2;
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+	line-height: 1.3;
+	white-space: nowrap;
+	transform: translate(-50%, -50%);
+	transition: opacity 120ms ease;
+}
+
+.cine-zone-chip.is-hovered {
+	border-color: rgba(255, 255, 255, 0.45);
+	background: rgba(14, 14, 16, 0.85);
+}
+
+.cine-zone-chip.is-faded {
+	opacity: 0.25;
+}
+
+.cine-zone-dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+.cine-zone-stops {
+	color: rgba(255, 255, 255, 0.65);
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-zone-row {
+	display: grid;
+	grid-template-columns: 8px 68px 38px 1fr;
+	column-gap: 8px;
+	align-items: center;
+	margin: 0 -4px;
+	padding: 2px 4px;
+	border-radius: 5px;
+}
+
+.cine-zone-row.is-hovered {
+	background: rgba(255, 255, 255, 0.1);
+}
+
+.cine-zone-row-stops {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-zone-row-detail {
+	color: rgba(255, 255, 255, 0.5);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* ---------- depth and haze ---------- */
+
+/* Placed over the part of the frame the model read, bars left out. */
+.cine-depth {
+	position: absolute;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+.cine-depth-mist,
+.cine-depth-lines,
+.cine-depth-chips {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+
+.cine-depth-mist {
+	filter: blur(14px);
+}
+
+.cine-depth-contour {
+	fill: none;
+	stroke: rgba(255, 255, 255, var(--depth-opacity, 0.5));
+	stroke-width: var(--depth-width, 1px);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+	filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.55));
+}
+
+.cine-depth-veil {
+	fill: rgba(0, 0, 0, 0.62);
+}
+
+.cine-depth-shadow {
+	fill: none;
+	stroke: rgba(0, 0, 0, 0.3);
+	stroke-width: 3px;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+}
+
+.cine-depth-outline {
+	fill: none;
+	stroke: rgba(255, 255, 255, 0.7);
+	stroke-width: 1.25px;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+}
+
+.cine-depth-outline.is-hovered {
+	stroke: #fff;
+	stroke-width: 1.75px;
+}
+
+.cine-depth-chart {
+	display: block;
+	margin: 4px 0 6px;
+	overflow: visible;
+}
+
+.cine-depth-bar {
+	fill: rgba(255, 255, 255, 0.22);
+}
+
+.cine-depth-black {
+	fill: none;
+	stroke-width: 1.5px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.cine-depth-axis {
+	stroke: rgba(255, 255, 255, 0.2);
+	stroke-width: 1px;
+}
+
+.cine-depth-tick {
+	fill: rgba(255, 255, 255, 0.45);
+	font-size: 10px;
+}
+
+.cine-depth-legend {
+	display: flex;
+	gap: 12px;
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.cine-depth-legend span::before {
+	content: '';
+	display: inline-block;
+	width: 10px;
+	margin-right: 5px;
+	vertical-align: 2px;
+}
+
+.cine-depth-legend .is-bars::before {
+	height: 7px;
+	vertical-align: 0;
+	border-radius: 1.5px;
+	background: rgba(255, 255, 255, 0.3);
+}
+
+.cine-depth-legend .is-line::before {
+	height: 0;
+	border-top: 1.5px solid var(--depth-line, #aac8ff);
+}
+
+.cine-depth-verdict {
+	margin-top: 6px;
+	color: #e8e8e8;
+}
+
+/* Zones or depth over the picture. */
+.cine-light-switch {
+	display: flex;
+	margin-left: auto;
+	padding: 2px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.cine-light-switch button {
+	height: auto;
+	padding: 1px 8px;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	box-shadow: none;
+	color: rgba(255, 255, 255, 0.6);
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.cine-light-switch button.is-active {
+	background: rgba(255, 255, 255, 0.16);
+	color: #fff;
+}
+
+/* The picture under the readout: takes the pointer, except where a video's
+   own controls sit. */
+.cine-light-hit {
+	position: absolute;
+	inset: 0;
+	pointer-events: auto;
+	cursor: crosshair;
+}
+
+.cine-light-hit.is-video {
+	bottom: 56px;
+}
+
+.cine-loupe {
+	position: absolute;
+	z-index: 9;
+	width: 168px;
+	pointer-events: none;
+}
+
+.cine-loupe-lens {
+	display: block;
+	width: 168px;
+	height: 168px;
+	border-radius: 50%;
+	box-shadow:
+		0 0 0 2px rgba(255, 255, 255, 0.92),
+		0 0 0 3px rgba(0, 0, 0, 0.35),
+		0 10px 28px rgba(0, 0, 0, 0.6);
+}
+
+/* The patch the reading averages, at the lens's centre. */
+.cine-loupe-reticle {
+	position: absolute;
+	left: 84px;
+	top: 84px;
+	width: 16px;
+	height: 16px;
+	border: 1px solid #fff;
+	border-radius: 2px;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+	transform: translate(-50%, -50%);
+}
+
+.cine-loupe-caption {
+	margin-top: 10px;
+	padding: 6px 10px 7px;
+	border-radius: 10px;
+	background: rgba(14, 14, 16, 0.84);
+	backdrop-filter: blur(8px);
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+	color: #eee;
+	font-size: 11px;
+	text-align: center;
+}
+
+.cine-loupe-main {
+	display: flex;
+	align-items: baseline;
+	justify-content: center;
+	gap: 5px;
+}
+
+.cine-loupe-stops {
+	font-size: 20px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-loupe-unit,
+.cine-loupe-muted {
+	color: rgba(255, 255, 255, 0.55);
+}
+
+.cine-loupe-zone {
+	margin-left: 4px;
+	padding: 1px 6px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.1);
+	font-weight: 600;
+}
+
+.cine-loupe-sub {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	margin-top: 2px;
+	color: rgba(255, 255, 255, 0.7);
+	font-variant-numeric: tabular-nums;
+}
+
+.cine-loupe-swatch {
+	width: 10px;
+	height: 10px;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.cine-loupe-flag {
+	margin-top: 4px;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.cine-loupe-flag.is-clipped {
+	color: #ff7b7b;
+}
+
+.cine-loupe-flag.is-crushed {
+	color: #7fb2ff;
+}
+
+.cine-loupe-pins {
+	pointer-events: none;
+}
+
+.cine-loupe-pin circle {
+	fill: none;
+	stroke: #fff;
+	stroke-width: 2px;
+	paint-order: stroke;
+}
+
+.cine-loupe-pin circle.cine-loupe-pin-dot {
+	fill: #fff;
+	stroke: rgba(0, 0, 0, 0.5);
+	stroke-width: 1px;
+}
+
+.cine-loupe-pin text {
+	fill: #fff;
+	stroke: rgba(0, 0, 0, 0.7);
+	stroke-width: 3px;
+	paint-order: stroke;
+	font-family: var(--font-interface);
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.cine-loupe-link {
+	stroke: #fff;
+	stroke-width: 1.5px;
+	stroke-dasharray: 4 4;
+	opacity: 0.9;
+}
+
+.cine-loupe-compare {
+	position: absolute;
+	padding: 4px 11px;
+	border-radius: 999px;
+	background: rgba(14, 14, 16, 0.86);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+	color: #fff;
+	font-size: 12px;
+	font-weight: 500;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	pointer-events: none;
+	transform: translate(-50%, calc(-100% - 12px));
 }

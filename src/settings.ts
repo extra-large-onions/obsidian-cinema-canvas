@@ -1,5 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type CinemaCanvasPlugin from './main';
+import type { TriangleGuide } from './view/framing';
 
 export type SortField = 'name' | 'modified' | 'created' | 'path';
 
@@ -25,6 +26,21 @@ export interface CinemaCanvasSettings {
 	hoverPlayVideos: boolean;
 	loopLightboxVideos: boolean;
 	openOnStartup: boolean;
+
+	/** Centre cross over gallery media; toggled from the canvas, not here. */
+	guideCenter: boolean;
+	/** Golden triangle over gallery media, and which way it leans. */
+	guideTriangle: TriangleGuide;
+	/** Rule of thirds over gallery media. */
+	guideThirds: boolean;
+	/** Crop ratio the aspect mask shows, width / height; 0 is off. */
+	guideMask: number;
+	/** The lighting readout in the full screen viewer. */
+	lightingReadout: boolean;
+	/** Also read faces (key/fill, rim); needs the face model. */
+	lightingFaces: boolean;
+	/** Also read depth and haze; needs the depth model. */
+	lightingDepth: boolean;
 
 	/** Draw cached proxies in the grid instead of the original files. */
 	useThumbnails: boolean;
@@ -91,6 +107,14 @@ export const DEFAULT_SETTINGS: CinemaCanvasSettings = {
 	hoverPlayVideos: true,
 	loopLightboxVideos: true,
 	openOnStartup: false,
+
+	guideCenter: false,
+	guideTriangle: 'off',
+	guideThirds: false,
+	guideMask: 0,
+	lightingReadout: false,
+	lightingFaces: false,
+	lightingDepth: false,
 
 	useThumbnails: true,
 	thumbnailQuality: 0.8,
@@ -385,6 +409,30 @@ export class CinemaCanvasSettingTab extends PluginSettingTab {
 						ok ? 5000 : 10000,
 					);
 				}),
+			);
+
+		new Setting(containerEl).setName('Lighting readout').setHeading();
+
+		new Setting(containerEl)
+			.setName('Read faces')
+			.setDesc(
+				'Also measure each face: key side, key/fill ratio, shadow edge and rim. Needs a 230 KB face model and the ONNX runtime, which the readout offers to download.',
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.lightingFaces)
+					.onChange((v) => this.update('lightingFaces', v)),
+			);
+
+		new Setting(containerEl)
+			.setName('Read depth and haze')
+			.setDesc(
+				'Split a paused frame into near, middle and far, and show where haze lifts the blacks with distance. Needs a 99 MB depth model and the ONNX runtime, which the readout offers to download.',
+			)
+			.addToggle((t) =>
+				t
+					.setValue(this.plugin.settings.lightingDepth)
+					.onChange((v) => this.update('lightingDepth', v)),
 			);
 
 		new Setting(containerEl).setName('Playback').setHeading();

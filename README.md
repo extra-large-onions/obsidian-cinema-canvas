@@ -107,6 +107,107 @@ another stops the previous one.
 | Next / previous in full screen | on-screen arrows | `←` `→` |
 | Native full screen | expand button in the viewer | `F` |
 | Close viewer | click the backdrop | `Esc` |
+| Rule of thirds on / off | toolbar, or the viewer's bar | `G` |
+| Center guide on / off | toolbar, or the viewer's bar | `C` |
+| Triangle guide: off → leaning one way → flipped | toolbar, or the viewer's bar | `T` |
+| Aspect mask: off → 2.39 → 1.85 → 16:9 → 4:3 → 1:1 → 9:16 | toolbar, or the viewer's bar | `M` |
+| Lighting readout on / off | sun button in the viewer's bar or the film tab's header | `L` (viewer) |
+| Draw on the frame on / off | pencil button in the viewer's bar | `D` |
+
+The framing guides are drawn on the picture itself, not the cell, so a
+letterboxed clip gets them inside its own frame. The aspect mask darkens what a
+crop to another ratio would lose, and the other guides then fit the crop, not
+the full picture. The center guide is a cross with a small circle. The triangle
+guide is the golden triangle: one corner-to-corner diagonal, with a line from
+each of the other two corners meeting it at a right angle. Guides show on every
+cell and in the full screen viewer, and are remembered between sessions.
+
+### Lighting readout
+
+In the full screen viewer and the film tab, the sun button (`L` in the viewer)
+reads the lighting of the frame on screen; it is one setting for both: once for a still, twice a second while a clip plays, and again
+on every pause and seek. It measures the graded image, as the audience sees it.
+
+- **Frame:** contrast in stops, low / mid / high key, lifted or crushed blacks,
+  and clipped highlights.
+- **Zones:** on a paused clip or a still, the picture is split into up to six
+  zones lit alike, each outlined on the picture and labelled with a name and
+  its level in stops over the frame's median: Shadow, Shade, Mid, Lit, Hot,
+  plus Blown (clipped) and Crushed (black). One zone can be in several places:
+  every part of the frame lit to the same level. Point at a zone, or its row in
+  the panel, and everything else dims. Letterbox bars are left out.
+- **Spot loupe:** point anywhere on the picture for a magnifier with that
+  spot's level in stops over the median, its zone-system number (V is middle
+  grey), its colour, and whether it is clipped or crushed. Click one spot, then
+  another, to read B against A ("B is 3.1 stops under A · 8.6:1"); a third
+  click starts over, and right click clears. On a clip, the bottom strip is
+  left to the video's own controls.
+- **Depth and haze** (optional, see below): the **Zones / Depth** switch in the
+  panel swaps the zones for depth. Fine lines of equal depth are laid over the
+  picture like a contour map, fainter toward the back, and the frame is split
+  into near, middle and far planes. The panel charts contrast and the black
+  level from front to back. Where the far planes' blacks lift and their
+  contrast falls, the air is showing: a soft blue mist marks where, and the
+  panel says how much ("Haze: the far plane is 3.1 stops flatter, its blacks
+  lifted to 45% from 8%"). A lift that is the same near and far is called the
+  grade, and a pale background of a strong colour, like a red wall, is called
+  a surface, not haze. Depth is relative (which things are nearer, not how
+  far), and is read on a paused frame only, in two to three seconds.
+- **Edge light:** rims and kickers traced in warm gold on the picture: bright edges,
+  among the brightest things in frame, along a dark shape. No model needed. It
+  cannot tell a rim from a neon tube or a lit window edge; the tracing shows which.
+- **Each face** (up to three): which screen side the key light comes from, and
+  the key-to-fill ratio (the lit half of the face against the shadow half:
+  2:1 is soft, 4:1 dramatic, 8:1 and up noir); whether the shadow edge is hard
+  or soft; the color of the key and fill sides; a rim light, if the edge of the
+  head is brighter than the face and the background beyond it; and whether the
+  background is brighter than the face (backlit).
+
+Depth readings are off by default too; turn on **Settings → Cinema canvas →
+Read depth and haze**. They use Depth Anything V2 Small (Apache-2.0), 99 MB,
+on the same ONNX runtime, downloaded from the panel. The model runs on a
+worker thread so Obsidian stays responsive while it reads.
+
+Frame readings need nothing extra. Face readings are off by default; turn on
+**Settings → Cinema canvas → Read faces** to get them. They use YuNet, a 230 KB
+face detector (OpenCV Zoo, MIT licence), and the ONNX runtime that shot
+detection also uses. The panel then offers to download both; they are plain downloads of public
+files, and every frame is read locally. The readings are measurements, not
+judgements: a face turned away, a hat brim or a very dark frame can mislead
+them, and the panel says so where it can tell.
+
+### Frame marks
+
+In the full screen viewer, the pencil button (or `D`) pauses a clip and opens
+the draw tools: arrow, circle, box, line, freehand and text, five colours, and
+how long a new mark shows (this frame, 1 second, 3 seconds, to the end of the
+cut, the whole cut). Each mark shows only while the film is inside its range,
+so an arrow drawn on one frame is gone on the next.
+
+| Action | Mouse | Key |
+| --- | --- | --- |
+| Pick a tool | the strip above the picture | `1`–`7` |
+| Draw | drag on the picture; hold `Shift` for 45° or a square | — |
+| Add text | Text tool, click, type, `Enter` | — |
+| Select, move | click or drag a mark | — |
+| Reshape | drag the white handles | — |
+| Edit text | double-click it | — |
+| Delete | trash button | `Delete` |
+| Step one frame / one second | — | `←` `→` / `Shift+←` `Shift+→` |
+| Play / pause | — | `Space` |
+| Undo / redo | the strip | `Ctrl+Z` / `Ctrl+Shift+Z` |
+| Leave draw mode | the check button | `D` / `Esc` |
+
+To make a selected mark last longer, step to where it should stop and select
+**End after this frame** (or **Start on this frame** for its start). The thin
+track under the picture shows where every mark falls on the film; select one
+to jump to it, or drag along the track to scrub.
+
+Marks are saved in the film's note, in the same block as its scenes and
+labels, one line per mark, with times in seconds and points as fractions of
+the picture. They belong to the film file, so a cut opened from the strip
+shows the marks inside it. Stills cannot take marks yet, and the film tab does
+not show them yet.
 
 Every navigation action is also a command, so you can bind your own hotkeys
 under **Settings → Hotkeys**.
@@ -151,9 +252,17 @@ src/
     thumbnails.ts       tiered, disk-cached proxy generation + priority queue
     shots.ts            detection queue, candidate cache, pure shot building
     scenes.ts           scenes and cut labels: pure model, and the note's block
+    marks.ts            frame marks: pure model, and their part of that block
     scene-store.ts      reads and writes the scene note beside each film
     vault-cache.ts      _cache/cinema-canvas/ in the vault, and the move there
     transnet.ts         TransNetV2 inference over an ffmpeg rawvideo pipe
+    lighting.ts         frame and face lighting readings, pure
+    rim.ts              edge (rim) light detection, pure
+    zones.ts            light zones: areas lit alike, pure
+    depth.ts            depth planes, contours and haze from the depth model, pure
+    raster.ts           shared pixel helpers: small frames, bars, outlines, contours
+    faces.ts            the face model: download and run
+    depth-model.ts      the depth model: download, and run on a worker thread
     onnx.ts             onnxruntime-node loader and session cache, shared
     sound.ts            sound analysis queue, cache, pinned model download
     sound-analysis.ts   Silero VAD + PANNs + loudness over one decode; lanes
@@ -176,6 +285,13 @@ src/
     sound-pane.ts       the sound half of that tab: lanes, lists, and the run
     sound-lanes.ts      lane colours and canvas drawing, shared by strip + view
     lightbox.ts         full-screen viewer
+    light-meter.ts      the lighting readout: scheduling, panel, overlays
+    light-zones.ts      zone outlines and labels over the picture
+    light-depth.ts      depth contours, planes and haze mist, and the chart
+    light-loupe.ts      the spot meter under the pointer
+    frame-marks.ts      timed arrows, circles and text over the viewer's video
+    mark-draw.ts        one mark as SVG, in the picture's pixels
+    mark-toolbar.ts     the draw tools strip
 ```
 
 ## License

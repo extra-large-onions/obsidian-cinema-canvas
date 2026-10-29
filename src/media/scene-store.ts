@@ -234,9 +234,9 @@ export class SceneStore extends Component {
 	private newNote(film: TFile, notePath: string, notes: FilmNotes): string {
 		const link = this.app.fileManager.generateMarkdownLink(film, notePath);
 		return [
-			`Scenes and cut labels for ${link}.`,
+			`Scenes, cut labels and frame marks for ${link}.`,
 			'',
-			'Cinema Canvas reads and writes only the block below. Name scenes and label cuts in the cut view, or edit the block by hand: times are seconds from the start of the film. Anything else in this note is yours.',
+			'Cinema Canvas reads and writes only the block below. Name scenes and label cuts in the cut view, draw marks in the full screen viewer, or edit the block by hand: times are seconds from the start of the film. Anything else in this note is yours.',
 			'',
 			formatBlock(notes),
 			'',
